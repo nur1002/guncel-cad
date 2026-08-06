@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm -v)",
+      "Bash(npm create *)",
+      "Bash(rm -rf /tmp/bilcad-scaffold && npm create vite@latest /tmp/bilcad-scaffold -- --template react-ts 2>&1 | tail -40)",
+      "Bash(TARGET=\"C:\\\\Users\\\\HP\\\\OneDrive\\\\Masaüstü\\\\cad\" *)",
+      "Bash(npm install *)",
+      "Bash(npx tsc *)",
+      "Bash(node -e \"console.log\\(require\\('./node_modules/react/package.json'\\).version\\)\")",
+      "Bash(npm run *)",
+      "Bash(node -e \"console.log\\(require\\('./node_modules/pdfjs-dist/package.json'\\).version\\)\")"
+    ]
+  }
+}
