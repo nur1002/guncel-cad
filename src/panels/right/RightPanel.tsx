@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useStore } from "../engine/store";
+import { useStore } from "../../engine/core/store";
 
 export default function RightPanel() {
   const selection = useStore((s) => s.selection);

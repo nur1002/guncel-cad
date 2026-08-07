@@ -1,9 +1,9 @@
 // Saf 2D canvas çizim fonksiyonları. Hiçbiri state tutmaz; CanvasEditor bu
 // fonksiyonları her frame'de mevcut veriyle çağırır (§4).
 
-import type { Corner, FloorVariantData, PlacedComponent, Room, Wall } from "../data/model";
-import type { RoomTypeConfig } from "../data/roomTypes";
-import { COLOR_BLUEPRINT, COLOR_GRID, COLOR_INK, COLOR_RUST } from "../styles/theme";
+import type { Corner, FloorVariantData, PlacedComponent, Room, VectorTrace, Wall } from "../../data/model";
+import type { RoomTypeConfig } from "../../data/roomTypes";
+import { COLOR_BLUEPRINT, COLOR_GRID, COLOR_INK, COLOR_RUST } from "../../styles/theme";
 import { cm2ToM2, dist, perpendicular, polygonAreaCm2, polygonCentroid, type Pt } from "./geometry";
 
 export interface View2D {
@@ -38,6 +38,76 @@ export function drawBackgroundImage(
   ctx.globalAlpha = opacity;
   ctx.drawImage(img, topLeft.x, topLeft.y, w, h);
   ctx.restore();
+}
+
+/**
+ * DWG/DXF içe aktarımından gelen ham kroki: yalnızca ince referans çizgileri —
+ * köşe numarası/dolgu/duvar YOKTUR (§ "otomatik tanıma yapmasın, dosyayı olduğu
+ * gibi açsın"). `x,y,rotationDeg,scale` ile yerleştirme dönüşümü canvas transform'u
+ * (translate+rotate+scale) ile uygulanır — her nokta için ayrı ayrı hesap yapmaz,
+ * bu yüzden binlerce segment olsa bile hızlıdır. `locked=false` iken (henüz "Parsele
+ * Yerleştir" onaylanmamış) kesikli bir bbox çerçevesi + döndürme kolu gösterilir.
+ */
+export function drawVectorTrace(ctx: CanvasRenderingContext2D, view: View2D, trace: VectorTrace, selected: boolean) {
+  if (!trace.visible || trace.segments.length === 0) return;
+  const originScreen = worldToScreen(view, { x: trace.x, y: trace.y });
+  const s = trace.scale * view.pxPerCm;
+
+  ctx.save();
+  ctx.globalAlpha = trace.opacity;
+  ctx.translate(originScreen.x, originScreen.y);
+  ctx.rotate((trace.rotationDeg * Math.PI) / 180);
+  ctx.scale(s, s);
+  ctx.strokeStyle = trace.locked ? "#334155" : "#2563EB";
+  ctx.lineWidth = 1 / s;
+  ctx.beginPath();
+  for (const seg of trace.segments) {
+    ctx.moveTo(seg.a.x, seg.a.y);
+    ctx.lineTo(seg.b.x, seg.b.y);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  if (!trace.locked) {
+    const halfW = (trace.widthCm * trace.scale) / 2;
+    const halfH = (trace.heightCm * trace.scale) / 2;
+    const rad = (trace.rotationDeg * Math.PI) / 180;
+    const corner = (lx: number, ly: number) => {
+      const rx = lx * Math.cos(rad) - ly * Math.sin(rad);
+      const ry = lx * Math.sin(rad) + ly * Math.cos(rad);
+      return worldToScreen(view, { x: trace.x + rx, y: trace.y + ry });
+    };
+    const c1 = corner(-halfW, -halfH);
+    const c2 = corner(halfW, -halfH);
+    const c3 = corner(halfW, halfH);
+    const c4 = corner(-halfW, halfH);
+
+    ctx.save();
+    ctx.setLineDash([6, 4]);
+    ctx.strokeStyle = selected ? COLOR_RUST : "#2563EB";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    [c1, c2, c3, c4].forEach((c, i) => (i === 0 ? ctx.moveTo(c.x, c.y) : ctx.lineTo(c.x, c.y)));
+    ctx.closePath();
+    ctx.stroke();
+    ctx.restore();
+
+    // Döndürme kolu: üst kenarın ortasından dışarı doğru bir tutamaç.
+    const handleLocal = corner(0, -halfH - 30 / view.pxPerCm);
+    const topMid = corner(0, -halfH);
+    ctx.save();
+    ctx.strokeStyle = "#2563EB";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(topMid.x, topMid.y);
+    ctx.lineTo(handleLocal.x, handleLocal.y);
+    ctx.stroke();
+    ctx.fillStyle = "#2563EB";
+    ctx.beginPath();
+    ctx.arc(handleLocal.x, handleLocal.y, 6, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
 }
 
 export function drawParselBoundary(
@@ -324,8 +394,39 @@ export function drawWall(
   selected: boolean,
   hovered: boolean,
   fillColor = "#FFFFFF",
-  isBalconyRailing = false
+  isBalconyRailing = false,
+  renderMode: 'thick' | 'centerline' | 'doubleline' = 'doubleline'
 ) {
+  if (renderMode === 'centerline') {
+    const sa = worldToScreen(view, a);
+    const sb = worldToScreen(view, b);
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(sa.x, sa.y);
+    ctx.lineTo(sb.x, sb.y);
+    if (isBalconyRailing || wall.malzeme === "korkuluk") {
+      ctx.setLineDash([6, 5]);
+      ctx.strokeStyle = selected ? COLOR_RUST : "#0284C7";
+      ctx.lineWidth = selected ? 2 : 1.5;
+    } else if (wall.source === "auto-detected") {
+      ctx.setLineDash([6, 4]);
+      ctx.strokeStyle = COLOR_RUST;
+      ctx.lineWidth = 1.5;
+    } else {
+      let color = "#1E293B";
+      if (selected) color = "#C1652F";
+      else if (hovered) color = "#2F6690";
+      ctx.strokeStyle = color;
+      ctx.lineWidth = selected ? 2 : hovered ? 1.75 : 1.5;
+    }
+    ctx.stroke();
+    ctx.restore();
+    if (wall.source === "auto-detected") {
+      const mid = worldToScreen(view, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+      drawConfidenceBadge(ctx, mid, wall.confidence);
+    }
+    return;
+  }
   const quad = wallQuad(a, b, wall.thickness).map((p) => worldToScreen(view, p));
   ctx.beginPath();
   quad.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
@@ -343,7 +444,13 @@ export function drawWall(
     return;
   }
 
-  ctx.fillStyle = selected ? "#C1652F33" : fillColor;
+  if (renderMode === 'doubleline') {
+    // AutoCAD tarzı içi boş çift çizgi: Seçildiğinde hafif turuncu dolgu, normalde şeffaf (arkayı kapatmaz)
+    ctx.fillStyle = selected ? "rgba(193, 101, 47, 0.15)" : "transparent";
+  } else {
+    // Dolu kalın duvar görünümü
+    ctx.fillStyle = selected ? "#C1652F33" : fillColor;
+  }
   ctx.fill();
 
   if (wall.source === "auto-detected") {
@@ -735,11 +842,74 @@ export function drawRoomDraft(ctx: CanvasRenderingContext2D, view: View2D, p0: P
   ctx.fillText(`${Math.round(widthCm)} × ${Math.round(depthCm)} cm`, cx, cy + 18);
 }
 
+/**
+ * "Oda" aracının varsayılan tık-tık-tık serbest çokgen modu için canlı önizleme:
+ * şimdiye kadar yerleştirilen köşeler + imlecin anlık konumuyla oluşan alan, henüz
+ * döngü kapanmadan (son duvar bırakılmadan) seçili oda tipinin rengiyle dolgulanır
+ * (§13 "kapanmakta olan alanın canlı renklenmesi").
+ */
+export function drawRoomChainPreview(
+  ctx: CanvasRenderingContext2D,
+  view: View2D,
+  points: Pt[],
+  cursor: Pt | null,
+  fillColor: string
+) {
+  if (points.length === 0) return;
+  const allPts = cursor ? [...points, cursor] : points;
+
+  if (allPts.length >= 3) {
+    ctx.save();
+    ctx.beginPath();
+    allPts.forEach((p, i) => {
+      const s = worldToScreen(view, p);
+      if (i === 0) ctx.moveTo(s.x, s.y);
+      else ctx.lineTo(s.x, s.y);
+    });
+    ctx.closePath();
+    ctx.fillStyle = fillColor;
+    ctx.globalAlpha = 0.45;
+    ctx.fill();
+    ctx.restore();
+
+    const areaM2 = cm2ToM2(polygonAreaCm2(allPts));
+    const centroid = worldToScreen(view, polygonCentroid(allPts));
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "600 13px 'IBM Plex Mono', monospace";
+    ctx.fillStyle = COLOR_RUST;
+    ctx.fillText(`${areaM2.toFixed(2)} m²`, centroid.x, centroid.y);
+  }
+
+  ctx.save();
+  ctx.strokeStyle = "#3B82F6";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  points.forEach((p, i) => {
+    const s = worldToScreen(view, p);
+    if (i === 0) ctx.moveTo(s.x, s.y);
+    else ctx.lineTo(s.x, s.y);
+  });
+  if (cursor) {
+    const s = worldToScreen(view, cursor);
+    ctx.lineTo(s.x, s.y);
+  }
+  ctx.stroke();
+  ctx.restore();
+
+  points.forEach((p, i) => {
+    const s = worldToScreen(view, p);
+    ctx.fillStyle = i === 0 ? "#22C55E" : "#3B82F6";
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, i === 0 ? 5 : 4, 0, Math.PI * 2);
+    ctx.fill();
+  });
+}
+
 export function drawDraftChain(ctx: CanvasRenderingContext2D, view: View2D, points: Pt[], cursor: Pt | null) {
   if (points.length === 0) return;
   ctx.save();
-  ctx.setLineDash([6, 4]);
-  ctx.strokeStyle = COLOR_BLUEPRINT;
+  ctx.strokeStyle = "#3B82F6";
   ctx.lineWidth = 2;
   ctx.beginPath();
   points.forEach((p, i) => {
@@ -756,11 +926,49 @@ export function drawDraftChain(ctx: CanvasRenderingContext2D, view: View2D, poin
 
   points.forEach((p) => {
     const s = worldToScreen(view, p);
-    ctx.fillStyle = COLOR_BLUEPRINT;
+    ctx.fillStyle = "#3B82F6";
     ctx.beginPath();
     ctx.arc(s.x, s.y, 4, 0, Math.PI * 2);
     ctx.fill();
   });
+}
+
+export function drawGhostWallPreview(
+  ctx: CanvasRenderingContext2D,
+  view: View2D,
+  anchor: {x:number, y:number},
+  cursor: {x:number, y:number},
+  thickness: number
+) {
+  // Duvarın kalınlığını hesapla ve ekran koordinatlarına dönüştür
+  const quad = wallQuad(anchor, cursor, thickness).map((p) => worldToScreen(view, p));
+  
+  ctx.save();
+  // 1) Transparan mavi dolgu (hayalet alan)
+  ctx.beginPath();
+  quad.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+  ctx.closePath();
+  ctx.fillStyle = "rgba(59, 130, 246, 0.15)";
+  ctx.fill();
+  
+  // 2) Hayalet kontur (çift çizgi sınırları)
+  ctx.strokeStyle = "rgba(59, 130, 246, 0.45)";
+  ctx.lineWidth = 1.2;
+  ctx.stroke();
+  
+  // 3) Tek ince mavi aks/centerline çizgisi
+  const sa = worldToScreen(view, anchor);
+  const sc = worldToScreen(view, cursor);
+  ctx.beginPath();
+  ctx.moveTo(sa.x, sa.y);
+  ctx.lineTo(sc.x, sc.y);
+  ctx.strokeStyle = "#3B82F6";
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+  
+  ctx.restore();
+
+  drawDimension(ctx, view, anchor, cursor);
 }
 
 export function drawMeasurePreview(ctx: CanvasRenderingContext2D, view: View2D, a: Pt, b: Pt) {

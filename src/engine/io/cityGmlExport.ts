@@ -7,8 +7,8 @@
 // verisini gerçek 3B koordinatlarla, standart bldg şeması altında, GIS araçlarının
 // (FME, 3DCityDB, QGIS CityGML eklentisi vb.) okuyabileceği geçerli bir XML olarak taşır.
 
-import type { Floor, FloorVariantData, PlacedComponent, Wall } from "../data/model";
-import { dist } from "./geometry";
+import type { Floor, FloorVariantData, PlacedComponent, Wall } from "../../data/model";
+import { dist } from "../drawing/geometry";
 
 const CM_TO_M = 0.01;
 const DEFAULT_WALL_HEIGHT_M = 2.7;

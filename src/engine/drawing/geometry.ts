@@ -72,6 +72,85 @@ export function projectPointToSegment(p: Pt, a: Pt, b: Pt): { point: Pt; t: numb
   return { point, t, distance: dist(p, point) };
 }
 
+/** İki doğru parçasının iç kesişim noktası (uçlarda değil, gövdede); kesişmiyorsa null. */
+export function segmentIntersection(
+  p1: Pt,
+  p2: Pt,
+  p3: Pt,
+  p4: Pt
+): { point: Pt; t: number; u: number } | null {
+  const d1x = p2.x - p1.x;
+  const d1y = p2.y - p1.y;
+  const d2x = p4.x - p3.x;
+  const d2y = p4.y - p3.y;
+  const denom = d1x * d2y - d1y * d2x;
+  if (Math.abs(denom) < 1e-9) return null; // paralel
+  const t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / denom;
+  const u = ((p3.x - p1.x) * d1y - (p3.y - p1.y) * d1x) / denom;
+  if (t <= 0 || t >= 1 || u <= 0 || u >= 1) return null;
+  return { point: { x: p1.x + t * d1x, y: p1.y + t * d1y }, t, u };
+}
+
+/**
+ * Bir kenar (graf ayrıtı) kapalı bir döngünün parçası mı, yoksa "köprü" (hiçbir
+ * döngüye ait olmayan, sarkan/bağlantısız bir çizgi) mi? Standart Tarjan köprü
+ * bulma algoritması, YİNELEMELİ (özyinelemesiz) — büyük gerçek DWG/DXF dosyalarında
+ * binlerce düğüm olabileceğinden çağrı yığını taşmasın diye özyineleme kullanılmaz.
+ * DXF/DWG içe aktarımında "sadece kapalı alanları (odaları) tanı, mobilya/ölçü/
+ * çizgi gibi tek başına duran parçaları duvar olarak ekleme" kuralını uygulamak için
+ * kullanılır: köprü OLMAYAN kenarlar bir döngünün parçasıdır, yani gerçek bir oda
+ * sınırı olabilir; köprüler ise atılır.
+ */
+export function findCycleEdges(adjacency: Map<string, Set<string>>): Set<string> {
+  const disc = new Map<string, number>();
+  const low = new Map<string, number>();
+  const visited = new Set<string>();
+  const cycleEdges = new Set<string>();
+  let timer = 0;
+  const edgeKey = (a: string, b: string) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+
+  for (const start of adjacency.keys()) {
+    if (visited.has(start)) continue;
+    type Frame = { node: string; parent: string | null; neighbors: string[]; idx: number };
+    const stack: Frame[] = [];
+    visited.add(start);
+    disc.set(start, timer);
+    low.set(start, timer);
+    timer++;
+    stack.push({ node: start, parent: null, neighbors: [...(adjacency.get(start) ?? [])], idx: 0 });
+
+    while (stack.length > 0) {
+      const frame = stack[stack.length - 1];
+      if (frame.idx < frame.neighbors.length) {
+        const next = frame.neighbors[frame.idx];
+        frame.idx++;
+        if (next === frame.parent) continue;
+        if (!visited.has(next)) {
+          visited.add(next);
+          disc.set(next, timer);
+          low.set(next, timer);
+          timer++;
+          stack.push({ node: next, parent: frame.node, neighbors: [...(adjacency.get(next) ?? [])], idx: 0 });
+        } else {
+          low.set(frame.node, Math.min(low.get(frame.node)!, disc.get(next)!));
+          cycleEdges.add(edgeKey(frame.node, next)); // geri-kenar her zaman bir döngünün parçasıdır
+        }
+      } else {
+        stack.pop();
+        const parentFrame = stack[stack.length - 1];
+        if (parentFrame) {
+          low.set(parentFrame.node, Math.min(low.get(parentFrame.node)!, low.get(frame.node)!));
+          if (low.get(frame.node)! <= disc.get(parentFrame.node)!) {
+            cycleEdges.add(edgeKey(parentFrame.node, frame.node));
+          }
+          // aksi halde bu bir köprüdür — cycleEdges'e eklenmez.
+        }
+      }
+    }
+  }
+  return cycleEdges;
+}
+
 export function lerp(a: Pt, b: Pt, t: number): Pt {
   return { x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t };
 }

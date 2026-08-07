@@ -2,10 +2,10 @@
 // tablo görünümü. Bir satıra tıklamak o nesneyi tuvalde seçer.
 
 import { useMemo, useState } from "react";
-import { useStore, type Selection } from "../engine/store";
-import { getRoomType } from "../data/roomTypes";
-import { roomAreaM2 } from "../engine/render2d";
-import { dist } from "../engine/geometry";
+import { useStore, type Selection } from "../../engine/core/store";
+import { getRoomType } from "../../data/roomTypes";
+import { roomAreaM2 } from "../../engine/drawing/render2d";
+import { dist } from "../../engine/drawing/geometry";
 
 interface Row {
   sel: Selection;

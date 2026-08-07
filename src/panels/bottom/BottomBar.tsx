@@ -1,4 +1,4 @@
-import { useStore } from "../engine/store";
+import { useStore } from "../../engine/core/store";
 
 export default function BottomBar() {
   const cursorWorld = useStore((s) => s.cursorWorld);

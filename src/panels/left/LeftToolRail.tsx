@@ -1,11 +1,11 @@
 import { useRef, useState } from "react";
-import { useStore, type Tool } from "../engine/store";
-import * as M from "../engine/mutations";
-import { handleImportFile } from "../engine/importDispatch";
-import { OpenProjectModal } from "./Modals";
-import { roomCategoryLabels, roomCategoryOrder } from "../data/roomTypes";
-import { roomAreaM2 } from "../engine/render2d";
-import { dist } from "../engine/geometry";
+import { useStore, type Tool } from "../../engine/core/store";
+import * as M from "../../engine/core/mutations";
+import { handleImportFile } from "../../engine/io/importDispatch";
+import { OpenProjectModal } from "../../modals/Modals";
+import { roomCategoryLabels, roomCategoryOrder } from "../../data/roomTypes";
+import { roomAreaM2 } from "../../engine/drawing/render2d";
+import { dist } from "../../engine/drawing/geometry";
 
 const THICKNESS_OPTIONS = [10, 15, 20, 25, 30];
 
@@ -42,6 +42,15 @@ const DRAWING_TOOL_ICONS: Record<string, React.ReactNode> = {
   ),
   room: (
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M3 17l5-9 6 4 7-8" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="3" cy="17" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="14" cy="12" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="21" cy="4" r="1.6" fill="currentColor" stroke="none" />
+    </svg>
+  ),
+  roomRect: (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
       <rect x="3" y="6" width="18" height="12" rx="1" />
     </svg>
   ),
@@ -77,6 +86,12 @@ const EDIT_TOOL_ICONS: Record<string, React.ReactNode> = {
       <path d="M6 9L3 12l3 3" />
     </svg>
   ),
+  rotate: (
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M4 12a8 8 0 1 1 3 6.2" strokeLinecap="round" />
+      <path d="M4 18v-5h5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
 };
 
 /** Sol raydaki "Katmanlar" sekmesinin içeriği: oda tipi paleti + çizim/düzenleme araçları. */
@@ -91,9 +106,10 @@ function RoomAddPanel() {
   const copySelectionToClipboard = useStore((s) => s.copySelectionToClipboard);
   const pasteClipboard = useStore((s) => s.pasteClipboard);
   const mirrorSelection = useStore((s) => s.mirrorSelection);
+  const rotateSelection = useStore((s) => s.rotateSelection);
   const pushToast = useStore((s) => s.pushToast);
 
-  const ROOM_SHAPE_TOOLS: Tool[] = ["room", "polygon", "rotrect"];
+  const ROOM_SHAPE_TOOLS: Tool[] = ["room", "roomRect", "polygon", "rotrect"];
 
   const pickType = (id: string) => {
     setActiveRoomTypeId(id);
@@ -115,8 +131,9 @@ function RoomAddPanel() {
   const DRAWING_TOOLS: { id: Tool; label: string }[] = [
     { id: "point", label: "Nokta" },
     { id: "wall", label: "Çizgi" },
+    { id: "room", label: "Oda (Çizgi)" },
+    { id: "roomRect", label: "Oda (Dikdörtgen)" },
     { id: "polygon", label: "Poligon" },
-    { id: "room", label: "Dikdörtgen" },
     { id: "rotrect", label: "D.Dikdörtgen" },
   ];
 
@@ -132,6 +149,7 @@ function RoomAddPanel() {
     },
     { id: "delete", label: "Sil", onClick: () => deleteSelection() },
     { id: "mirror", label: "Aynala", onClick: () => mirrorSelection("vertical") },
+    { id: "rotate", label: "Döndür", onClick: () => rotateSelection(90) },
   ];
 
   return (
@@ -452,6 +470,7 @@ function ProjectSettingsPanel() {
   const currentPage = useStore((s) => s.currentPage());
   const variant = currentPage.drawing;
   const bg = variant.backgroundImage;
+  const trace = variant.vectorTrace;
   const updateVariant = useStore((s) => s.updateVariant);
   const calibrationMode = useStore((s) => s.calibrationMode);
   const setCalibrationMode = useStore((s) => s.setCalibrationMode);
@@ -566,6 +585,76 @@ function ProjectSettingsPanel() {
             onClick={() => updateVariant((v) => M.removeBackgroundImage(v))}
           >
             Arka Planı Kaldır
+          </button>
+        </>
+      )}
+
+      <div className="tool-section-title" style={{ marginTop: 10 }}>
+        İçe Aktarılan Kroki (DWG/DXF)
+      </div>
+      {!trace ? (
+        <p className="tool-section-sub" style={{ padding: "0 2px" }}>
+          Henüz bir DWG/DXF krokisi yüklenmedi. Üstteki araç çubuğundaki "İçe Aktar" ile yükleyin.
+        </p>
+      ) : (
+        <>
+          <p className="tool-section-sub" style={{ padding: "0 2px" }}>
+            {trace.locked
+              ? "Yerleştirme onaylandı. Yeniden düzenlemek için \"Düzenlemeye Aç\"a basın."
+              : "Tuvalde gövdesinden sürükleyip taşıyabilir, üstteki mavi koldan döndürebilirsiniz."}
+          </p>
+          <div className="dim-row">
+            <span className="dim-row-label">Saydamlık</span>
+            <input
+              type="range"
+              min={0.1}
+              max={1}
+              step={0.05}
+              value={trace.opacity}
+              onChange={(e) => updateVariant((v) => M.updateVectorTrace(v, { opacity: Number(e.target.value) }))}
+            />
+          </div>
+          <div className="dim-row">
+            <span className="dim-row-label">Açı (°)</span>
+            <input
+              type="number"
+              className="dim-row-custom"
+              disabled={trace.locked}
+              value={Math.round(trace.rotationDeg)}
+              onChange={(e) => updateVariant((v) => M.updateVectorTrace(v, { rotationDeg: Number(e.target.value) || 0 }))}
+            />
+          </div>
+
+          {trace.locked ? (
+            <button
+              className="btn-modal-submit"
+              style={{ width: "100%", marginTop: 8, padding: "9px 0", fontSize: 12, fontWeight: 700 }}
+              onClick={() => {
+                updateVariant((v) => M.updateVectorTrace(v, { locked: false }));
+                pushToast("Kroki tekrar düzenlemeye açıldı.", "bilgi");
+              }}
+            >
+              🔓 Düzenlemeye Aç
+            </button>
+          ) : (
+            <button
+              className="btn-modal-submit"
+              style={{ width: "100%", marginTop: 8, padding: "9px 0", fontSize: 12, fontWeight: 700, background: "#16a34a" }}
+              onClick={() => {
+                updateVariant((v) => M.updateVectorTrace(v, { locked: true }));
+                pushToast("Kroki parsele yerleştirildi.", "basari");
+              }}
+            >
+              📍 Parsele Yerleştir
+            </button>
+          )}
+
+          <button
+            className="btn-danger"
+            style={{ width: "100%", marginTop: 8 }}
+            onClick={() => updateVariant((v) => M.removeVectorTrace(v))}
+          >
+            Krokiyi Kaldır
           </button>
         </>
       )}

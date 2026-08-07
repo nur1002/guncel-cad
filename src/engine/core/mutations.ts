@@ -12,11 +12,12 @@ import {
   type PlacedComponent,
   type Room,
   type TextAnnotation,
+  type VectorTrace,
   type Wall,
-} from "../data/model";
-import type { CatalogSubtype } from "../data/componentCatalog";
-import { DEFAULT_FLOOR_MATERIAL, DEFAULT_WALL_MATERIAL } from "../data/materials";
-import { dist, projectPointToSegment } from "./geometry";
+} from "../../data/model";
+import type { CatalogSubtype } from "../../data/componentCatalog";
+import { DEFAULT_FLOOR_MATERIAL, DEFAULT_WALL_MATERIAL } from "../../data/materials";
+import { dist, projectPointToSegment, segmentIntersection } from "../drawing/geometry";
 
 const SNAP_RADIUS_CM = 20;
 
@@ -39,6 +40,23 @@ export function addCorner(variant: FloorVariantData, p: { x: number; y: number }
   return [{ ...variant, corners: { ...variant.corners, [id]: corner } }, id];
 }
 
+/**
+ * `addCorner`'ın toplu hali: her çağrıda TÜM `corners` sözlüğünü kopyalamaz.
+ * `addCorner`'ı bir döngüde N kez çağırmak O(n²)'dir (her çağrı mevcut sözlüğü
+ * baştan kopyalıyor) — büyük DXF/DWG içe aktarımlarında (binlerce köşe) bu, asıl
+ * "donma" nedeniydi. Bu fonksiyon tek bir kopyalamayla O(n) çalışır.
+ */
+export function addCornersBulk(variant: FloorVariantData, points: { x: number; y: number }[]): [FloorVariantData, ID[]] {
+  const newCorners: Record<ID, Corner> = {};
+  const ids: ID[] = [];
+  for (const p of points) {
+    const id = makeId("corner");
+    newCorners[id] = { id, x: p.x, y: p.y };
+    ids.push(id);
+  }
+  return [{ ...variant, corners: { ...variant.corners, ...newCorners } }, ids];
+}
+
 function findWallBetween(variant: FloorVariantData, a: ID, b: ID): Wall | null {
   return (
     Object.values(variant.walls).find((w) => (w.a === a && w.b === b) || (w.a === b && w.b === a)) ?? null
@@ -57,6 +75,27 @@ export function addWall(
   const id = makeId("wall");
   const wall: Wall = { id, a, b, thickness, malzeme, source: "manuel" };
   return { ...variant, walls: { ...variant.walls, [id]: wall } };
+}
+
+/**
+ * `addWall`'ın toplu (bulk) hali: her çağrıda mevcut duvarlar arasında O(n) tekrar
+ * taraması YAPMAZ — çağıran taraf çiftlerin zaten benzersiz olduğunu garanti eder.
+ * Büyük DXF/DWG içe aktarımlarında (binlerce segment) `addWall`'ı döngüde çağırmak
+ * O(n²) olup donmalara yol açıyordu; bu fonksiyon O(n)'dir.
+ */
+export function addWallsBulk(
+  variant: FloorVariantData,
+  pairs: [ID, ID][],
+  thickness = 20,
+  malzeme: string = DEFAULT_WALL_MATERIAL
+): FloorVariantData {
+  const newWalls: Record<ID, Wall> = {};
+  for (const [a, b] of pairs) {
+    if (a === b) continue;
+    const id = makeId("wall");
+    newWalls[id] = { id, a, b, thickness, malzeme, source: "manuel" };
+  }
+  return { ...variant, walls: { ...variant.walls, ...newWalls } };
 }
 
 /** cornerIds: kapalı döngü, ilk ve son eleman aynı köşe (döngüyü kapatan tekrar hariç tutulur). */
@@ -566,6 +605,104 @@ export function splitWall(variant: FloorVariantData, wallId: ID, at: { x: number
   return { ...vv, components, rooms };
 }
 
+/**
+ * Yeni bir duvar ucunu çözümler: en yakın köşeye yapış, yoksa mevcut bir duvarın
+ * gövdesine (T/X kesişimi) denk geliyorsa o duvarı böl ve kesişim noktasında yeni
+ * bir köşe oluştur, o da yoksa serbest bir köşe ekle. Böylece yeni çizilen duvarlar
+ * mevcut duvarlarla otomatik olarak birleşir (§7 "sürekli kesişim/junction algılaması").
+ */
+export function resolveWallEndpoint(
+  variant: FloorVariantData,
+  point: { x: number; y: number },
+  excludeWallId?: ID
+): [FloorVariantData, ID] {
+  const existingCornerId = findNearestCorner(variant, point);
+  if (existingCornerId) return [variant, existingCornerId];
+
+  let bestWallId: ID | null = null;
+  let bestDist = SNAP_RADIUS_CM;
+  for (const w of Object.values(variant.walls)) {
+    if (w.id === excludeWallId) continue;
+    const a = variant.corners[w.a];
+    const b = variant.corners[w.b];
+    if (!a || !b) continue;
+    const proj = projectPointToSegment(point, a, b);
+    const wallLen = dist(a, b);
+    const splitAt = proj.t * wallLen;
+    if (splitAt < 10 || wallLen - splitAt < 10) continue; // uca çok yakınsa köşeye yapışmış sayılır
+    if (proj.distance <= bestDist) {
+      bestWallId = w.id;
+      bestDist = proj.distance;
+    }
+  }
+
+  if (bestWallId) {
+    const wall = variant.walls[bestWallId];
+    const a = variant.corners[wall.a];
+    const b = variant.corners[wall.b];
+    const proj = projectPointToSegment(point, a, b);
+    const split = splitWall(variant, bestWallId, proj.point);
+    const junctionId = findNearestCorner(split, proj.point);
+    if (junctionId) return [split, junctionId];
+  }
+
+  return addCorner(variant, point);
+}
+
+/**
+ * `resolveWallEndpoint` sadece yeni duvarın UÇLARINI mevcut duvarlara bağlar.
+ * Bu fonksiyon ise yeni duvarın GÖVDESİNİN mevcut duvarları ortadan (X kesişimi)
+ * kestiği durumları da yakalar: her kesişimde hem mevcut duvar hem de yeni duvar
+ * o noktada bölünür, kesişim noktasında ortak bir köşe oluşturulur (§7).
+ */
+export function addWallWithJunctions(
+  variant: FloorVariantData,
+  aCornerId: ID,
+  bCornerId: ID,
+  thickness = 20,
+  malzeme: string = DEFAULT_WALL_MATERIAL
+): FloorVariantData {
+  if (aCornerId === bCornerId) return variant;
+  let vv = variant;
+  const a = vv.corners[aCornerId];
+  const b = vv.corners[bCornerId];
+  if (!a || !b) return vv;
+
+  // Yeni duvarın gövdesini kesen mevcut duvarları bul (t'ye göre sıralı).
+  type Crossing = { wallId: ID; t: number; point: { x: number; y: number } };
+  const crossings: Crossing[] = [];
+  for (const w of Object.values(vv.walls)) {
+    if (w.a === aCornerId || w.a === bCornerId || w.b === aCornerId || w.b === bCornerId) continue;
+    const wa = vv.corners[w.a];
+    const wb = vv.corners[w.b];
+    if (!wa || !wb) continue;
+    const hit = segmentIntersection(a, b, wa, wb);
+    if (hit) crossings.push({ wallId: w.id, t: hit.t, point: hit.point });
+  }
+  crossings.sort((x, y) => x.t - y.t);
+
+  let fromId = aCornerId;
+  for (const crossing of crossings) {
+    // Aradaki mevcut duvar önceki adımda zaten bölünmüş/değişmiş olabilir; güncel halini tekrar bul.
+    const stillThere = vv.walls[crossing.wallId];
+    if (!stillThere) continue;
+    const wa = vv.corners[stillThere.a];
+    const wb = vv.corners[stillThere.b];
+    if (!wa || !wb) continue;
+    const proj = projectPointToSegment(crossing.point, wa, wb);
+    const wallLen = dist(wa, wb);
+    const splitAt = proj.t * wallLen;
+    if (splitAt < 10 || wallLen - splitAt < 10) continue; // uca çok yakın, ayrı bir kesişim değil
+    vv = splitWall(vv, crossing.wallId, proj.point);
+    const junctionId = findNearestCorner(vv, proj.point);
+    if (!junctionId) continue;
+    vv = addWall(vv, fromId, junctionId, thickness, malzeme);
+    fromId = junctionId;
+  }
+  vv = addWall(vv, fromId, bCornerId, thickness, malzeme);
+  return vv;
+}
+
 function buildOznitelikler(
   subtype: CatalogSubtype,
   overrides: Record<string, string | number | boolean>
@@ -756,6 +893,43 @@ export function removeBackgroundImage(variant: FloorVariantData): FloorVariantDa
   return { ...variant, backgroundImage: null };
 }
 
+/**
+ * DWG/DXF içe aktarımından gelen ham çizgi krokisini ayarlar. Wall/Corner/Room
+ * ÜRETMEZ — "otomatik tanıma yapma, dosyayı olduğu gibi aç" ilkesi (bkz. VectorTrace).
+ * Varsayılan konum (0,0) — parsel merkezine hizalama çağıran taraf (importDispatch,
+ * parsel bilgisine erişimi olan tek yer) sorumluluğundadır (bkz. updateVectorTrace).
+ */
+export function setVectorTrace(
+  variant: FloorVariantData,
+  segments: VectorTrace["segments"],
+  widthCm: number,
+  heightCm: number
+): FloorVariantData {
+  const trace: VectorTrace = {
+    segments,
+    widthCm,
+    heightCm,
+    x: 0,
+    y: 0,
+    rotationDeg: 0,
+    scale: 1,
+    opacity: 1,
+    visible: true,
+    locked: false,
+  };
+  return { ...variant, vectorTrace: trace };
+}
+
+export function updateVectorTrace(variant: FloorVariantData, patch: Partial<VectorTrace>): FloorVariantData {
+  if (!variant.vectorTrace) return variant;
+  return { ...variant, vectorTrace: { ...variant.vectorTrace, ...patch } };
+}
+
+export function removeVectorTrace(variant: FloorVariantData): FloorVariantData {
+  if (!variant.vectorTrace) return variant;
+  return { ...variant, vectorTrace: null };
+}
+
 export function mirrorSelectedEntities(
   variant: FloorVariantData,
   cornerIds: ID[],
@@ -789,6 +963,48 @@ export function mirrorSelectedEntities(
         konum: { ...comp.konum, y: 2 * centerVal - comp.konum.y },
       };
     }
+  }
+
+  return { ...variant, corners, components };
+}
+
+/**
+ * Seçili köşeleri/bileşenleri verilen pivot noktası etrafında `angleDeg` derece
+ * döndürür; zemin bileşenlerinin kendi `rotationDeg`'i de aynı miktarda değişir
+ * (§ "Döndür özelliği").
+ */
+export function rotateSelectedEntities(
+  variant: FloorVariantData,
+  cornerIds: ID[],
+  floorCompIds: ID[],
+  angleDeg: number,
+  pivot: { x: number; y: number }
+): FloorVariantData {
+  const rad = (angleDeg * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const rotatePoint = (x: number, y: number) => ({
+    x: pivot.x + (x - pivot.x) * cos - (y - pivot.y) * sin,
+    y: pivot.y + (x - pivot.x) * sin + (y - pivot.y) * cos,
+  });
+
+  const corners = { ...variant.corners };
+  for (const id of cornerIds) {
+    const c = corners[id];
+    if (!c) continue;
+    const p = rotatePoint(c.x, c.y);
+    corners[id] = { ...c, x: p.x, y: p.y };
+  }
+
+  const components = { ...variant.components };
+  for (const id of floorCompIds) {
+    const comp = components[id];
+    if (!comp || comp.konum.kind !== "zemin") continue;
+    const p = rotatePoint(comp.konum.x, comp.konum.y);
+    components[id] = {
+      ...comp,
+      konum: { ...comp.konum, x: p.x, y: p.y, rotationDeg: ((comp.konum.rotationDeg ?? 0) + angleDeg + 360) % 360 },
+    };
   }
 
   return { ...variant, corners, components };

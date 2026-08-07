@@ -1,8 +1,8 @@
 import { useRef, useState } from "react";
-import { useStore } from "../engine/store";
-import { handleImportFile } from "../engine/importDispatch";
-import { exportProjectAsCityGml } from "../engine/cityGmlExport";
-import { exportVariantAsPdf } from "../engine/pdfExport";
+import { useStore } from "../../engine/core/store";
+import { handleImportFile } from "../../engine/io/importDispatch";
+import { exportProjectAsCityGml } from "../../engine/io/cityGmlExport";
+import { exportVariantAsPdf } from "../../engine/io/pdfExport";
 
 const RIBBON_TABS = [
   { id: "cizim", label: "Çizim" },
@@ -31,6 +31,8 @@ export default function Toolbar() {
   const setTool = useStore((s) => s.setTool);
   const leftRailOpen = useStore((s) => s.leftRailOpen);
   const toggleLeftRail = useStore((s) => s.toggleLeftRail);
+  const wallRenderMode = useStore((s) => s.wallRenderMode);
+  const setWallRenderMode = useStore((s) => s.setWallRenderMode);
   const pushToast = useStore((s) => s.pushToast);
 
   const [lineStyle, setLineStyle] = useState("surekli");
@@ -174,6 +176,20 @@ export default function Toolbar() {
             <option value={20}>20 cm</option>
             <option value={50}>50 cm</option>
             <option value={100}>100 cm</option>
+          </select>
+        </div>
+
+        {/* Wall Render Mode Dropdown */}
+        <div className="control-field" style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+          <span className="control-label" style={{ fontSize: "11px", color: "#94a3b8" }}>Görünüm:</span>
+          <select
+            className="ribbon-select"
+            value={wallRenderMode}
+            onChange={(e) => setWallRenderMode(e.target.value as any)}
+          >
+            <option value="doubleline">Çift Çizgi (CAD)</option>
+            <option value="centerline">Tek Çizgi</option>
+            <option value="thick">Dolu Kalın</option>
           </select>
         </div>
 

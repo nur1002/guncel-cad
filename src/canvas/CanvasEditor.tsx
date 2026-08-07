@@ -1,9 +1,10 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useStore, type Selection } from "../engine/store";
-import * as M from "../engine/mutations";
-import { hitTestComponent, hitTestCorner, hitTestRoom, hitTestWall } from "../engine/hitTest";
+import { useStore, type Selection } from "../engine/core/store";
+import * as M from "../engine/core/mutations";
+import { hitTestComponent, hitTestCorner, hitTestRoom, hitTestWall } from "../engine/drawing/hitTest";
 import {
   drawBackgroundImage,
+  drawVectorTrace,
   drawComponent,
   drawCornerHandle,
   drawDimension,
@@ -12,6 +13,7 @@ import {
   drawMarquee,
   drawReferenceGrid,
   drawRoomDraft,
+  drawRoomChainPreview,
   drawGrid,
   drawParselBoundary,
   drawMeasurePreview,
@@ -21,14 +23,15 @@ import {
   drawSnapIndicator,
   drawTextAnnotations,
   drawWall,
+  drawGhostWallPreview,
   screenToWorld,
   wallQuad,
   worldToScreen,
   type View2D,
-} from "../engine/render2d";
+} from "../engine/drawing/render2d";
 import type { FloorVariantData, ID } from "../data/model";
-import { dist, projectPointToSegment, snapToGrid, type Pt } from "../engine/geometry";
-import { computeSmartGuides, resolveSnapPoint, type GuideLine, type SnapKind } from "../engine/snapping";
+import { dist, pointInRotatedRect, projectPointToSegment, snapToGrid, type Pt } from "../engine/drawing/geometry";
+import { computeSmartGuides, resolveSnapPoint, type GuideLine, type SnapKind } from "../engine/drawing/snapping";
 import { getRoomType, DEFAULT_ROOM_TYPE_ID } from "../data/roomTypes";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
 
@@ -46,6 +49,8 @@ export default function CanvasEditor() {
   const layerVisibility = useStore((s) => s.layerVisibility);
   const planMode = useStore((s) => s.planMode);
   const roomTypes = useStore((s) => s.roomTypes);
+  const activeRoomTypeId = useStore((s) => s.activeRoomTypeId);
+  const setChainDrawingActive = useStore((s) => s.setChainDrawingActive);
   const catalog = useStore((s) => s.catalog);
   const fitRequestId = useStore((s) => s.fitRequestId);
   const showRaster = useStore((s) => s.showRaster);
@@ -62,6 +67,7 @@ export default function CanvasEditor() {
   const gridStepCm = useStore((s) => s.gridStepCm);
   const gridSnapEnabled = useStore((s) => s.gridSnapEnabled);
   const snapEnabled = useStore((s) => s.snapEnabled);
+  const wallRenderMode = useStore((s) => s.wallRenderMode);
   const pushToast = useStore((s) => s.pushToast);
   const calibrationMode = useStore((s) => s.calibrationMode);
   const setCalibrationMode = useStore((s) => s.setCalibrationMode);
@@ -104,11 +110,21 @@ export default function CanvasEditor() {
   const placeDragEndRef = useRef<number | null>(null);
   const roomDragRef = useRef<Pt | null>(null);
   const roomDragEndRef = useRef<Pt | null>(null);
+  // "room" aracı artık varsayılan olarak serbest-çizgi (tık-tık-tık) çokgen modunda çalışır;
+  // "roomRect" ayrı bir araç olarak eski dikdörtgen-sürükleme modelini korur (kullanıcı seçerse).
+  const roomChainPointsRef = useRef<Pt[]>([]);
+  const roomChainCursorRef = useRef<Pt | null>(null);
   const polyDragRef = useRef<Pt | null>(null);
   const polyDragEndRef = useRef<Pt | null>(null);
   const marqueeRef = useRef<Pt | null>(null);
   const marqueeEndRef = useRef<Pt | null>(null);
   const calibrationPointRef = useRef<Pt | null>(null);
+  // DWG/DXF krokisi (§ "Bounding box → parsel merkezi → sürükle → döndür → Parsele
+  // Yerleştir"): konum sürükleme ve döndürme kolu sürüklemesi için ayrı ref'ler.
+  const traceDragRef = useRef<{ startWorld: Pt; startX: number; startY: number; before: FloorVariantData } | null>(null);
+  const traceRotateRef = useRef<{ centerScreen: Pt; startAngle: number; startRotationDeg: number; before: FloorVariantData } | null>(
+    null
+  );
 
   const [contextMenu, setContextMenu] = useState<{
     screenX: number;
@@ -121,6 +137,39 @@ export default function CanvasEditor() {
     () => ({ pxPerCm, pan, width: size.width, height: size.height }),
     [pxPerCm, pan, size]
   );
+
+  // Cetvel (ruler) çentikleri: gerçek pan/zoom durumuna göre dinamik hesaplanır
+  // (önceden sabit, statik bir dizi olduğu için ekran kaydırılınca/yakınlaştırılınca
+  // gösterilen sayılar gerçek dünya koordinatlarıyla uyuşmuyordu).
+  const RULER_STEP_CANDIDATES = [10, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000, 20000, 50000, 100000];
+  const pickRulerStep = (pxPerCmVal: number, minPx = 55) => {
+    for (const step of RULER_STEP_CANDIDATES) {
+      if (step * pxPerCmVal >= minPx) return step;
+    }
+    return RULER_STEP_CANDIDATES[RULER_STEP_CANDIDATES.length - 1];
+  };
+  const hRulerTicks = useMemo(() => {
+    if (view.pxPerCm <= 0) return [];
+    const step = pickRulerStep(view.pxPerCm);
+    const worldStart = Math.floor(-view.pan.x / view.pxPerCm / step) * step;
+    const worldEnd = Math.ceil((size.width - view.pan.x) / view.pxPerCm / step) * step;
+    const ticks: { val: number; screenX: number }[] = [];
+    for (let v = worldStart; v <= worldEnd; v += step) {
+      ticks.push({ val: v, screenX: view.pan.x + v * view.pxPerCm });
+    }
+    return ticks;
+  }, [view.pan.x, view.pxPerCm, size.width]);
+  const vRulerTicks = useMemo(() => {
+    if (view.pxPerCm <= 0) return [];
+    const step = pickRulerStep(view.pxPerCm);
+    const worldStart = Math.floor(-view.pan.y / view.pxPerCm / step) * step;
+    const worldEnd = Math.ceil((size.height - view.pan.y) / view.pxPerCm / step) * step;
+    const ticks: { val: number; screenY: number }[] = [];
+    for (let v = worldStart; v <= worldEnd; v += step) {
+      ticks.push({ val: v, screenY: view.pan.y + v * view.pxPerCm });
+    }
+    return ticks;
+  }, [view.pan.y, view.pxPerCm, size.height]);
 
   // Throttled cursor update for BottomBar to eliminate UI lag
   const lastCursorUpdateRef = useRef(0);
@@ -152,10 +201,33 @@ export default function CanvasEditor() {
   // Fit to screen
   useEffect(() => {
     if (fitRequestId === 0) return;
-    const corners = Object.values(variant.corners);
-    if (corners.length === 0) return;
-    const xs = corners.map((c) => c.x);
-    const ys = corners.map((c) => c.y);
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (const c of Object.values(variant.corners)) {
+      xs.push(c.x);
+      ys.push(c.y);
+    }
+    // İçe aktarılan DWG/DXF krokisi Wall/Corner üretmez (§ "otomatik tanıma yapmasın"),
+    // bu yüzden yalnızca corners'a bakmak krokiyi görünmez bırakıyordu — döndürülmüş
+    // bbox'ın 4 köşesi de sınırlara dahil edilir.
+    const trace = variant.vectorTrace;
+    if (trace && trace.segments.length > 0) {
+      const halfW = (trace.widthCm * trace.scale) / 2;
+      const halfH = (trace.heightCm * trace.scale) / 2;
+      const rad = (trace.rotationDeg * Math.PI) / 180;
+      for (const [lx, ly] of [
+        [-halfW, -halfH],
+        [halfW, -halfH],
+        [halfW, halfH],
+        [-halfW, halfH],
+      ]) {
+        const rx = lx * Math.cos(rad) - ly * Math.sin(rad);
+        const ry = lx * Math.sin(rad) + ly * Math.cos(rad);
+        xs.push(trace.x + rx);
+        ys.push(trace.y + ry);
+      }
+    }
+    if (xs.length === 0) return;
     const minX = Math.min(...xs) - 100;
     const maxX = Math.max(...xs) + 100;
     const minY = Math.min(...ys) - 100;
@@ -226,6 +298,10 @@ export default function CanvasEditor() {
         }
       }
 
+      if (variant.vectorTrace) {
+        drawVectorTrace(ctx, view, variant.vectorTrace, traceDragRef.current !== null);
+      }
+
       if (planMode !== "duvarlar" && layerVisibility["alanlar"] !== false) {
         for (const room of Object.values(variant.rooms)) {
           const roomSelected = (selection?.type === "room" && selection.id === room.id) || isMultiSelected("room", room.id);
@@ -239,7 +315,7 @@ export default function CanvasEditor() {
           const b = variant.corners[wall.b];
           if (!a || !b) continue;
           const wallSelected = (selection?.type === "wall" && selection.id === wall.id) || isMultiSelected("wall", wall.id);
-          drawWall(ctx, view, wall, a, b, wallSelected, hovered?.type === "wall" && hovered.id === wall.id);
+          drawWall(ctx, view, wall, a, b, wallSelected, hovered?.type === "wall" && hovered.id === wall.id, undefined, undefined, wallRenderMode);
           drawDimension(ctx, view, a, b);
         }
       }
@@ -266,11 +342,17 @@ export default function CanvasEditor() {
       }
 
       if (activeTool === "wall" && wallDragRef.current && wallDragEndRef.current) {
+        drawGhostWallPreview(ctx, view, wallDragRef.current.anchorWorld, wallDragEndRef.current, nextWallThickness);
         drawDraftChain(ctx, view, [wallDragRef.current.anchorWorld], wallDragEndRef.current);
       }
 
-      if (activeTool === "room" && roomDragRef.current && roomDragEndRef.current) {
+      if (activeTool === "roomRect" && roomDragRef.current && roomDragEndRef.current) {
         drawRoomDraft(ctx, view, roomDragRef.current, roomDragEndRef.current);
+      }
+
+      if (activeTool === "room" && roomChainPointsRef.current.length > 0) {
+        const activeTypeConfig = roomTypes.find((r) => r.id === activeRoomTypeId);
+        drawRoomChainPreview(ctx, view, roomChainPointsRef.current, roomChainCursorRef.current, activeTypeConfig?.color ?? "#3B82F688");
       }
 
       if (activeTool === "polygon" && polyDragRef.current && polyDragEndRef.current) {
@@ -336,6 +418,7 @@ export default function CanvasEditor() {
     planMode,
     layerVisibility,
     roomTypes,
+    activeRoomTypeId,
     selection,
     hovered,
     activeTool,
@@ -457,6 +540,42 @@ export default function CanvasEditor() {
       return;
     }
 
+    // DWG/DXF krokisi: "Parsele Yerleştir" ile onaylanmadan önce (locked=false)
+    // tuvalde sürüklenip döndürebilir — döndürme kolu, sonra gövde (bbox) sırasıyla
+    // denenir. Onaylandıktan sonra normal seçim/çizim davranışına karışmaz.
+    if (activeTool === "select" && variant.vectorTrace && !variant.vectorTrace.locked) {
+      const trace = variant.vectorTrace;
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const screenPt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      const originScreen = worldToScreen(view, { x: trace.x, y: trace.y });
+      const halfH = (trace.heightCm * trace.scale) / 2;
+      const rad = (trace.rotationDeg * Math.PI) / 180;
+      const handleLocalY = -halfH - 30 / view.pxPerCm;
+      // Not: bu, render2d.ts'teki drawVectorTrace'in `corner(0, handleLocalY)` ile
+      // AYNI dönüşüm olmalı (x: -ly*sin, y: +ly*cos), yoksa çizilen kol ile buradaki
+      // tıklama alanı farklı yerlere düşer.
+      const handleWorld = {
+        x: trace.x + -handleLocalY * Math.sin(rad),
+        y: trace.y + handleLocalY * Math.cos(rad),
+      };
+      const handleScreen = worldToScreen(view, handleWorld);
+
+      if (dist(screenPt, handleScreen) <= 10) {
+        traceRotateRef.current = {
+          centerScreen: originScreen,
+          startAngle: Math.atan2(screenPt.y - originScreen.y, screenPt.x - originScreen.x),
+          startRotationDeg: trace.rotationDeg,
+          before: variant,
+        };
+        return;
+      }
+
+      if (pointInRotatedRect(worldPt, { x: trace.x, y: trace.y }, trace.widthCm * trace.scale, trace.heightCm * trace.scale, trace.rotationDeg)) {
+        traceDragRef.current = { startWorld: worldPt, startX: trace.x, startY: trace.y, before: variant };
+        return;
+      }
+    }
+
     if (e.ctrlKey || e.metaKey) {
       const cId = hitTestCorner(variant, view, worldPt);
       const compIdCtrl = !cId ? hitTestComponent(variant, worldPt) : null;
@@ -481,19 +600,99 @@ export default function CanvasEditor() {
     }
 
     if (activeTool === "wall") {
+      // Tık-tık-tık zincir çizimi: fareyi basılı tutmaya gerek yok. İlk tık başlangıç
+      // köşesini işaretler; sonraki her tık bir önceki köşeden buraya bir duvar segmenti
+      // ekler ve zinciri buradan sürdürür. Zincir 'S' tuşuna basılana (veya Esc/araç
+      // değişimine) kadar açık kalır (§ "line durması için S'ye basınca dursun").
       const snappedId = M.findNearestCorner(variant, worldPt);
       const snap = snappedId ? { point: variant.corners[snappedId], kind: "corner" as SnapKind } : snapWorldPoint(worldPt);
-      wallDragRef.current = {
-        anchorCornerId: snappedId,
-        anchorWorld: snap.point,
-        rawStartWorld: worldPt,
-      };
-      wallDragEndRef.current = snap.point;
-      liveSnapRef.current = snap.kind === "guide" ? null : snap;
+
+      if (!wallDragRef.current) {
+        wallDragRef.current = { anchorCornerId: snappedId, anchorWorld: snap.point, rawStartWorld: worldPt };
+        wallDragEndRef.current = snap.point;
+        liveSnapRef.current = snap.kind === "guide" ? null : snap;
+        setChainDrawingActive(true);
+        return;
+      }
+
+      const anchor = wallDragRef.current;
+      // Bu tıklamanın kendi konumundan yeniden hesapla — sadece önceki pointermove'a
+      // güvenmek, ardışık iki tık arasında hiç fare hareketi olmazsa (örn. çok hızlı
+      // çift tıklama) yanlışlıkla eski (henüz güncellenmemiş) uç noktayı kullanabilir.
+      const endWorld = snappedId ? snap.point : guideSnap(snap.point, anchor.anchorWorld).point;
+      if (dist(anchor.anchorWorld, endWorld) * view.pxPerCm < 4) return;
+
+      let anchorCornerId: ID | null = anchor.anchorCornerId;
+      let endCornerId: ID | null = snappedId;
+      let closedRoomId: ID | null = null;
+
+      updateVariant((v) => {
+        let vv = v;
+        if (!anchorCornerId) {
+          const [next, id] = M.resolveWallEndpoint(vv, anchor.anchorWorld);
+          vv = next;
+          anchorCornerId = id;
+        }
+        if (!endCornerId) {
+          const [next2, id2] = M.resolveWallEndpoint(vv, endWorld);
+          vv = next2;
+          endCornerId = id2;
+        }
+        if (anchorCornerId === endCornerId) return vv;
+        vv = M.addWallWithJunctions(vv, anchorCornerId, endCornerId, nextWallThickness);
+
+        const activeRoomTypeId = useStore.getState().activeRoomTypeId || DEFAULT_ROOM_TYPE_ID;
+        const selectedTypeConfig = roomTypes.find((r) => r.id === activeRoomTypeId);
+        const roomName = selectedTypeConfig ? selectedTypeConfig.label : "Yeni Oda";
+        const [next3, roomIds] = M.autoDetectAllRooms(vv, activeRoomTypeId, roomName);
+        vv = next3;
+        if (roomIds.length > 0) closedRoomId = roomIds[0];
+        return vv;
+      });
+
+      if (closedRoomId) setSelection({ type: "room", id: closedRoomId });
+
+      // Zinciri bu yeni köşeden sürdür.
+      wallDragRef.current = { anchorCornerId: endCornerId, anchorWorld: endWorld, rawStartWorld: worldPt };
+      wallDragEndRef.current = endWorld;
       return;
     }
 
     if (activeTool === "room") {
+      // Oda aracı varsayılan olarak tık-tık-tık serbest çokgen çizer (dörtgene
+      // zorlamaz): her tık bir köşe ekler, ilk köşeye yakın tıklamak döngüyü kapatıp
+      // odayı oluşturur. Dikdörtgen isteyen kullanıcı "roomRect" aracını seçer.
+      const nearId = M.findNearestCorner(variant, worldPt);
+      const snapped = nearId ? { x: variant.corners[nearId].x, y: variant.corners[nearId].y } : snapToGrid(worldPt);
+      const pts = roomChainPointsRef.current;
+
+      if (pts.length >= 3 && dist(pts[0], snapped) * view.pxPerCm < 14) {
+        const activeRoomTypeId = useStore.getState().activeRoomTypeId || DEFAULT_ROOM_TYPE_ID;
+        const selectedTypeConfig = roomTypes.find((r) => r.id === activeRoomTypeId);
+        const roomName = selectedTypeConfig ? selectedTypeConfig.label : "Yeni Oda";
+        let createdRoomId: ID | null = null;
+        updateVariant((v) => {
+          const [next, roomId] = M.createPolygonRoom(v, pts, nextWallThickness, activeRoomTypeId, roomName);
+          createdRoomId = roomId;
+          return next;
+        });
+        if (createdRoomId) setSelection({ type: "room", id: createdRoomId });
+        roomChainPointsRef.current = [];
+        roomChainCursorRef.current = null;
+        setChainDrawingActive(false);
+        return;
+      }
+
+      if (pts.length > 0 && dist(pts[pts.length - 1], snapped) * view.pxPerCm < 4) return;
+
+      roomChainPointsRef.current = [...pts, snapped];
+      roomChainCursorRef.current = snapped;
+      liveSnapRef.current = nearId ? { point: snapped, kind: "corner" } : { point: snapped, kind: "grid" };
+      setChainDrawingActive(true);
+      return;
+    }
+
+    if (activeTool === "roomRect") {
       const nearId = M.findNearestCorner(variant, worldPt);
       const start = nearId ? { x: variant.corners[nearId].x, y: variant.corners[nearId].y } : snapToGrid(worldPt);
       roomDragRef.current = start;
@@ -652,6 +851,24 @@ export default function CanvasEditor() {
     const worldPt = getWorldFromEvent(e);
     updateCursorThrottled(worldPt);
 
+    if (traceRotateRef.current) {
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const screenPt = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      const { centerScreen, startAngle, startRotationDeg } = traceRotateRef.current;
+      const currentAngle = Math.atan2(screenPt.y - centerScreen.y, screenPt.x - centerScreen.x);
+      const deltaDeg = ((currentAngle - startAngle) * 180) / Math.PI;
+      mutateVariantLive((v) => M.updateVectorTrace(v, { rotationDeg: startRotationDeg + deltaDeg }));
+      return;
+    }
+
+    if (traceDragRef.current) {
+      const { startWorld, startX, startY } = traceDragRef.current;
+      const dx = worldPt.x - startWorld.x;
+      const dy = worldPt.y - startWorld.y;
+      mutateVariantLive((v) => M.updateVectorTrace(v, { x: startX + dx, y: startY + dy }));
+      return;
+    }
+
     if (wallDragRef.current) {
       const snappedId = M.findNearestCorner(variant, worldPt);
       if (snappedId) {
@@ -666,6 +883,14 @@ export default function CanvasEditor() {
         liveSnapRef.current = s.kind === "guide" ? null : s;
         liveGuidesRef.current = g.guides;
       }
+      return;
+    }
+
+    if (roomChainPointsRef.current.length > 0) {
+      const nearId = M.findNearestCorner(variant, worldPt);
+      const snapped = nearId ? { x: variant.corners[nearId].x, y: variant.corners[nearId].y } : snapToGrid(worldPt);
+      roomChainCursorRef.current = snapped;
+      liveSnapRef.current = nearId ? { point: snapped, kind: "corner" } : { point: snapped, kind: "grid" };
       return;
     }
 
@@ -755,49 +980,18 @@ export default function CanvasEditor() {
   const onPointerUp = (e: React.PointerEvent) => {
     const worldPt = getWorldFromEvent(e);
 
-    if (wallDragRef.current) {
-      const anchor = wallDragRef.current;
-      wallDragRef.current = null;
-      wallDragEndRef.current = null;
-      liveSnapRef.current = null;
-      liveGuidesRef.current = [];
+    // Not: "wall" aracı artık tık-tık-tık zincir modeliyle çalışıyor — köşeler
+    // pointerDown'da yerleştiriliyor (bkz. onPointerDown), burada ek bir işlem
+    // gerekmiyor; zincir 'S' tuşuna basılana kadar açık kalıyor.
 
-      const movedScreenPx = dist(anchor.rawStartWorld, worldPt) * view.pxPerCm;
-      if (movedScreenPx < 4) return;
-
-      let anchorCornerId: ID | null = anchor.anchorCornerId;
-      let endCornerId: ID | null = M.findNearestCorner(variant, worldPt);
-      const snappedEndWorld = endCornerId
-        ? variant.corners[endCornerId]
-        : guideSnap(snapWorldPoint(worldPt).point, anchor.anchorWorld).point;
-      let closedRoomId: ID | null = null;
-
-      updateVariant((v) => {
-        let vv = v;
-        if (!anchorCornerId) {
-          const [next, id] = M.addCorner(vv, anchor.anchorWorld);
-          vv = next;
-          anchorCornerId = id;
-        }
-        if (!endCornerId) {
-          const [next2, id2] = M.addCorner(vv, snappedEndWorld);
-          vv = next2;
-          endCornerId = id2;
-        }
-        if (anchorCornerId === endCornerId) return vv;
-        vv = M.addWall(vv, anchorCornerId, endCornerId, nextWallThickness);
-
-        const activeRoomTypeId = useStore.getState().activeRoomTypeId || DEFAULT_ROOM_TYPE_ID;
-        const selectedTypeConfig = roomTypes.find((r) => r.id === activeRoomTypeId);
-        const roomName = selectedTypeConfig ? selectedTypeConfig.label : "Yeni Oda";
-
-        const [next3, roomIds] = M.autoDetectAllRooms(vv, activeRoomTypeId, roomName);
-        vv = next3;
-        if (roomIds.length > 0) closedRoomId = roomIds[0];
-        return vv;
-      });
-
-      if (closedRoomId) setSelection({ type: "room", id: closedRoomId });
+    if (traceRotateRef.current) {
+      commitPendingChange(traceRotateRef.current.before);
+      traceRotateRef.current = null;
+      return;
+    }
+    if (traceDragRef.current) {
+      commitPendingChange(traceDragRef.current.before);
+      traceDragRef.current = null;
       return;
     }
 
@@ -955,6 +1149,37 @@ export default function CanvasEditor() {
     return () => canvas.removeEventListener("wheel", handler);
   }, [view, setZoom, setPan]);
 
+  // Aktif çizim zinciri (duvar/oda) araç değişince veya Escape ile otomatik iptal edilir.
+  useEffect(() => {
+    if (activeTool !== "wall") {
+      wallDragRef.current = null;
+      wallDragEndRef.current = null;
+    }
+    if (activeTool !== "room") {
+      roomChainPointsRef.current = [];
+      roomChainCursorRef.current = null;
+    }
+    if (activeTool !== "wall" && activeTool !== "room") setChainDrawingActive(false);
+  }, [activeTool]);
+
+  // 'S' tuşu: App.tsx'teki TEK global handler karar veriyor (isChainDrawingActive
+  // bayrağına bakarak zinciri mi durduracak yoksa Snap'i mi aç/kapat edecek — bkz.
+  // store.ts). Burada sadece o kararın sonucunu (stopDrawRequestId artışını)
+  // dinleyip yerel zincir ref'lerini temizliyoruz; iki ayrı `window` keydown
+  // dinleyicisinin kayıt sırasına bağlı kalmıyoruz.
+  const stopDrawRequestId = useStore((s) => s.stopDrawRequestId);
+  const isFirstStopSignal = useRef(true);
+  useEffect(() => {
+    if (isFirstStopSignal.current) {
+      isFirstStopSignal.current = false;
+      return;
+    }
+    wallDragRef.current = null;
+    wallDragEndRef.current = null;
+    roomChainPointsRef.current = [];
+    roomChainCursorRef.current = null;
+  }, [stopDrawRequestId]);
+
   const onContextMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     const rect = canvasRef.current!.getBoundingClientRect();
@@ -1047,23 +1272,23 @@ export default function CanvasEditor() {
         </button>
       </div>
 
-      {/* Top Horizontal Ruler Scale Bar (Matches Target Screenshot: 0, 500, 1000, 1500, 2000, 2500... cm) */}
-      <div style={{ height: "20px", background: "#f8fafc", borderBottom: "1px solid #cbd5e1", display: "flex", alignItems: "center", paddingLeft: "30px", position: "relative", fontSize: "10px", color: "#64748b", fontFamily: "var(--font-mono)", flexShrink: 0 }}>
-        {[0, 500, 1000, 1500, 2000, 2500, 3000, 4000, 4500, 5000].map((val, idx) => (
-          <div key={idx} style={{ position: "absolute", left: `${30 + idx * 55}px` }}>
-            {val}
+      {/* Top Horizontal Ruler Scale Bar — gerçek pan/zoom durumuna göre dinamik cm değerleri */}
+      <div style={{ height: "20px", background: "#f8fafc", borderBottom: "1px solid #cbd5e1", position: "relative", fontSize: "10px", color: "#64748b", fontFamily: "var(--font-mono)", flexShrink: 0, overflow: "hidden" }}>
+        {hRulerTicks.map((t) => (
+          <div key={t.val} style={{ position: "absolute", left: `${30 + t.screenX}px`, top: "3px" }}>
+            {t.val}
           </div>
         ))}
-        <span style={{ position: "absolute", right: "8px", fontSize: "9px" }}>cm</span>
+        <span style={{ position: "absolute", right: "8px", top: "3px", fontSize: "9px" }}>cm</span>
       </div>
 
       {/* Main Canvas Container with Left Vertical Ruler Scale */}
       <div style={{ flex: 1, position: "relative", display: "flex", overflow: "hidden" }}>
-        {/* Left Vertical Ruler Scale */}
-        <div style={{ width: "30px", background: "#f8fafc", borderRight: "1px solid #cbd5e1", display: "flex", flexDirection: "column", alignItems: "center", position: "relative", fontSize: "9px", color: "#64748b", fontFamily: "var(--font-mono)", flexShrink: 0 }}>
-          {[-1000, 0, 500, 1000, 1500, 2000, 2500].map((val, idx) => (
-            <div key={idx} style={{ position: "absolute", top: `${15 + idx * 45}px`, transform: "rotate(-90deg)" }}>
-              {val}
+        {/* Left Vertical Ruler Scale — gerçek pan/zoom durumuna göre dinamik cm değerleri */}
+        <div style={{ width: "30px", background: "#f8fafc", borderRight: "1px solid #cbd5e1", position: "relative", fontSize: "9px", color: "#64748b", fontFamily: "var(--font-mono)", flexShrink: 0, overflow: "hidden" }}>
+          {vRulerTicks.map((t) => (
+            <div key={t.val} style={{ position: "absolute", top: `${t.screenY}px`, left: "2px", whiteSpace: "nowrap", transformOrigin: "left top", transform: "rotate(-90deg)" }}>
+              {t.val}
             </div>
           ))}
         </div>

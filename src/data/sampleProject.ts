@@ -237,6 +237,7 @@ export function createSampleProject(): Floor[] {
     },
     textAnnotations: {},
     backgroundImage: null,
+    vectorTrace: null,
     bagimsizBolumler: {
       bb1: {
         id: "bb1",

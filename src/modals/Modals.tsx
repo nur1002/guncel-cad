@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { useStore } from "../engine/store";
-import { exportProjectAsCityGml } from "../engine/cityGmlExport";
-import { exportVariantAsPdf } from "../engine/pdfExport";
-import { handleImportFile } from "../engine/importDispatch";
+import { useStore } from "../engine/core/store";
+import { exportProjectAsCityGml } from "../engine/io/cityGmlExport";
+import { exportVariantAsPdf } from "../engine/io/pdfExport";
+import { handleImportFile } from "../engine/io/importDispatch";
 
 interface ModalProps {
   onClose: () => void;
@@ -119,15 +119,18 @@ export function NewProjectModal({ onClose }: ModalProps) {
   const setParselInfo = useStore((s) => s.setParselInfo);
 
   const [name, setName] = useState("Yeni Konut Projesi");
-  const [parselArea, setParselArea] = useState(5000);
   const [parselWidthM, setParselWidthM] = useState(100);
   const [parselLengthM, setParselLengthM] = useState(50);
   const [unit, setUnit] = useState("cm");
   const [template, setTemplate] = useState("konut");
 
+  // Alan her zaman genişlik×uzunluk'tan hesaplanır; ayrı, bağımsız bir "alan" girişi
+  // olursa kullanıcı çarpımla uyuşmayan bir değer girebilir (§ eski hata: sabit 5000 m²
+  // gösteriliyordu). Tutarsızlık imkansız hale getirilir, "uyarı" yerine.
+  const parselArea = parselWidthM * parselLengthM;
+
   const handleCreate = () => {
     setParselInfo({
-      areaM2: parselArea,
       widthCm: parselWidthM * 100,
       lengthCm: parselLengthM * 100,
     });
@@ -154,13 +157,8 @@ export function NewProjectModal({ onClose }: ModalProps) {
 
           <div className="cad-field-row">
             <label className="cad-field">
-              <span>Parsel Alanı (m²)</span>
-              <input
-                type="number"
-                min="10"
-                value={parselArea}
-                onChange={(e) => setParselArea(Number(e.target.value))}
-              />
+              <span>Parsel Alanı (m²) — otomatik hesaplanır</span>
+              <input type="number" value={parselArea} disabled readOnly title="Genişlik × Uzunluk'tan otomatik hesaplanır" />
             </label>
 
             <label className="cad-field">

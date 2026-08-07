@@ -1,8 +1,8 @@
 // Plan kalite kontrol denetimleri (§4.6). Hepsi saf fonksiyon: variant alır,
 // bulguları döner; hiçbir şeyi değiştirmez.
 
-import type { FloorVariantData, ID } from "../data/model";
-import { dist, projectPointToSegment } from "./geometry";
+import type { FloorVariantData, ID } from "../../data/model";
+import { dist, projectPointToSegment } from "../drawing/geometry";
 
 export interface QaFinding {
   kind: "acik_uc" | "cakisan_duvar" | "kapisiz_oda" | "sifir_uzunluk";

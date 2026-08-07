@@ -1,14 +1,14 @@
 import React, { Suspense, lazy, useState, useEffect, useRef, Component } from "react";
 import type { ReactNode } from "react";
-import { useStore } from "./engine/store";
-import TopNav from "./components/TopNav";
-import LeftToolRail from "./components/LeftToolRail";
-import CanvasEditor from "./components/CanvasEditor";
-import RightPanel from "./components/RightPanel";
-import BottomBar from "./components/BottomBar";
-import Toasts from "./components/Toasts";
+import { useStore } from "./engine/core/store";
+import TopNav from "./panels/top/TopNav";
+import LeftToolRail from "./panels/left/LeftToolRail";
+import CanvasEditor from "./canvas/CanvasEditor";
+import RightPanel from "./panels/right/RightPanel";
+import BottomBar from "./panels/bottom/BottomBar";
+import Toasts from "./ui/Toasts";
 
-const View3D = lazy(() => import("./components/View3D"));
+const View3D = lazy(() => import("./view3d/View3D"));
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -78,6 +78,12 @@ function MainApp() {
   const setSelection = useStore((s) => s.setSelection);
   const setMultiSelection = useStore((s) => s.setMultiSelection);
   const setTool = useStore((s) => s.setTool);
+  const openCatalogFor = useStore((s) => s.openCatalogFor);
+  const fitToScreen = useStore((s) => s.fitToScreen);
+  const toggleGridVisible = useStore((s) => s.toggleGridVisible);
+  const toggleSnapEnabled = useStore((s) => s.toggleSnapEnabled);
+  const toggleOrtho = useStore((s) => s.toggleOrtho);
+  const toggleContinuousDrawing = useStore((s) => s.toggleContinuousDrawing);
 
   // Resizable Side Panels State
   const [leftWidth, setLeftWidth] = useState(300);
@@ -90,7 +96,7 @@ function MainApp() {
   const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const COLLAPSED_STRIP_WIDTH = 28;
 
-  // Global Keyboard Shortcuts
+  // Global Keyboard Shortcuts — Profesyonel CAD Kısayolları
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       const activeEl = document.activeElement;
@@ -99,40 +105,75 @@ function MainApp() {
       }
 
       const isCtrl = e.ctrlKey || e.metaKey;
+      const key = e.key.toLowerCase();
 
-      if (isCtrl && e.key.toLowerCase() === "z") {
+      // Ctrl kombinasyonları
+      if (isCtrl && key === "z") {
         e.preventDefault();
         if (e.shiftKey) redo();
         else undo();
-      } else if (isCtrl && e.key.toLowerCase() === "y") {
+      } else if (isCtrl && key === "y") {
         e.preventDefault();
         redo();
-      } else if (isCtrl && e.key.toLowerCase() === "c") {
+      } else if (isCtrl && key === "c") {
         e.preventDefault();
         copySelectionToClipboard();
-      } else if (isCtrl && e.key.toLowerCase() === "v") {
+      } else if (isCtrl && key === "v") {
         e.preventDefault();
         pasteClipboard();
-      } else if (isCtrl && e.key.toLowerCase() === "a") {
+      } else if (isCtrl && key === "a") {
         e.preventDefault();
         selectAllInVariant();
-      } else if (isCtrl && e.key.toLowerCase() === "s") {
+      } else if (isCtrl && key === "s") {
         e.preventDefault();
         saveProjectToLocalStorage();
-      } else if (e.key === "Delete" || e.key === "Backspace") {
+      }
+      // Silme
+      else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         deleteSelection();
-      } else if (e.key === "Escape") {
+      }
+      // Escape — iptal
+      else if (e.key === "Escape") {
         e.preventDefault();
         setSelection(null);
         setMultiSelection([]);
         setTool("select");
       }
+      // ── CAD Araç Kısayolları (Ctrl olmadan) ──
+      else if (!isCtrl) {
+        switch (key) {
+          case "w": e.preventDefault(); setTool("wall"); break;
+          case "q": e.preventDefault(); setTool("select"); break;
+          case "e": e.preventDefault(); deleteSelection(); break;
+          case "r": e.preventDefault(); setTool("room"); break;
+          case "p": e.preventDefault(); setTool("polygon"); break;
+          case "t": e.preventDefault(); setTool("text"); break;
+          case "m": e.preventDefault(); setTool("select"); break;
+          case "1": e.preventDefault(); openCatalogFor("kapi"); break;
+          case "2": e.preventDefault(); openCatalogFor("pencere"); break;
+          case "f": e.preventDefault(); fitToScreen(); break;
+          case "g": e.preventDefault(); toggleGridVisible(); break;
+          case "s":
+            e.preventDefault();
+            // Aktif bir duvar/oda çizim zinciri varsa 'S' onu durdurur; yoksa
+            // her zamanki gibi Snap aç/kapat kısayolu olarak çalışır (§ tek,
+            // sıralamadan bağımsız karar noktası — bkz. store.ts açıklaması).
+            if (useStore.getState().isChainDrawingActive) {
+              useStore.getState().requestStopDraw();
+            } else {
+              toggleSnapEnabled();
+            }
+            break;
+          case "o": e.preventDefault(); toggleOrtho(); break;
+          case " ": e.preventDefault(); toggleContinuousDrawing(); break;
+        }
+      }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [undo, redo, copySelectionToClipboard, pasteClipboard, selectAllInVariant, saveProjectToLocalStorage, deleteSelection, setSelection, setMultiSelection, setTool]);
+  }, [undo, redo, copySelectionToClipboard, pasteClipboard, selectAllInVariant, saveProjectToLocalStorage, deleteSelection, setSelection, setMultiSelection, setTool, openCatalogFor, fitToScreen, toggleGridVisible, toggleSnapEnabled, toggleOrtho, toggleContinuousDrawing]);
 
   // Handle panel resizing
   useEffect(() => {

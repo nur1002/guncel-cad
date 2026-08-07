@@ -1,7 +1,7 @@
 // Saf hit-test yardımcıları: dünya koordinatında bir noktanın hangi nesneye
 // isabet ettiğini bulur. CanvasEditor'daki pointer olaylarında kullanılır.
 
-import type { FloorVariantData, ID } from "../data/model";
+import type { FloorVariantData, ID } from "../../data/model";
 import { dist, pointInPolygon, pointInRotatedRect, projectPointToSegment, type Pt } from "./geometry";
 import type { View2D } from "./render2d";
 import { worldToScreen } from "./render2d";

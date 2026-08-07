@@ -2,8 +2,8 @@
 // çevrimdışı bir canvas üzerinde tam kapsamda (tüm çizim sığacak şekilde)
 // çalıştırıp tek bir görüntü olarak PDF'e gömer.
 
-import type { FloorVariantData } from "../data/model";
-import { getRoomType, type RoomTypeConfig } from "../data/roomTypes";
+import type { FloorVariantData } from "../../data/model";
+import { getRoomType, type RoomTypeConfig } from "../../data/roomTypes";
 import {
   drawComponent,
   drawCornerHandle,
@@ -14,7 +14,7 @@ import {
   drawTextAnnotations,
   drawWall,
   type View2D,
-} from "./render2d";
+} from "../drawing/render2d";
 
 const PX_PER_CM = 3; // baskı kalitesi için 2D canvas'tan daha yüksek çözünürlük
 

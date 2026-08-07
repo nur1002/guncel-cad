@@ -6,8 +6,9 @@
 //
 // Bu modül önce GERÇEK bir ayrıştırıcı kullanır: `@mlightcad/libredwg-web` paketi,
 // LibreDWG'nin WebAssembly'e derlenmiş halidir (GPL-3.0 — bkz. proje notları). DWG
-// dosyasını gerçekten çözüp DXF'e çevirir; sonuç, projede zaten var olan ve test
-// edilmiş DXF ayrıştırıcısına (`parseDxfFile`) verilir.
+// dosyasını gerçekten çözüp DXF'e çevirir; bu dönüşüm (WASM + ağır ayrıştırma) bir
+// Web Worker'da (`dwgConvertWorker.ts`) çalışır çünkü senkron WASM çağrısı ana
+// thread'i kilitleyip sayfayı "yanıt vermiyor" durumuna düşürüyordu.
 //
 // ÖNEMLİ TASARIM KARARI: WASM dönüşümü başarısız olursa (bozuk dosya, desteklenmeyen
 // çok eski/yeni bir DWG sürümü vb.) bu modül dosyanın ham baytlarını "koordinat gibi
@@ -25,10 +26,12 @@
 //     referans olarak arka plana eklenir (üzerinden elle çizilebilir).
 //  3) Hiçbiri yoksa: dürüstçe "veri çıkarılamadı" denir ve DXF/PDF'e çevirme önerilir.
 
-import type { FloorVariantData } from "../data/model";
-import * as M from "./mutations";
-import { type Pt } from "./geometry";
-import { parseDxfFile } from "./vectorImport";
+import type { FloorVariantData } from "../../data/model";
+import * as M from "../core/mutations";
+import type { Pt } from "../drawing/geometry";
+import { applyTraceSegments } from "./dxfImport";
+import type { TraceSegment } from "./vectorGraph";
+import type { DwgWorkerRequest, DwgWorkerResponse } from "./dwgConvertWorker";
 
 /** LibreDWG WASM modülünün .wasm ikili dosyasını bulacağı klasör (bkz. public/wasm/). */
 const LIBREDWG_WASM_DIR = "/wasm";
@@ -36,14 +39,8 @@ const LIBREDWG_WASM_DIR = "/wasm";
 export interface DwgImportResult {
   kind: "vector" | "raster" | "none";
   apply: (variant: FloorVariantData) => FloorVariantData;
-  wallCount: number;
+  segmentCount: number;
   message: string;
-  /**
-   * `apply()` çağrılmadan ÖNCE bilinen, veri gerçekten bulundu mu bilgisi. `wallCount`
-   * bir getter olduğu için (gerçek sayı yalnızca `apply()` çalıştıktan SONRA doğru
-   * değeri verir) çağıran taraf "uygulamaya değer mi" kararını bunun yerine bu alanla
-   * vermeli.
-   */
   success: boolean;
 }
 
@@ -58,36 +55,66 @@ function readHeader(bytes: Uint8Array): string {
 }
 
 /**
- * Gerçek DWG çözümlemesi: LibreDWG WASM ile dosyayı DXF'e çevirir, sonucu projede
- * zaten var olan `parseDxfFile` ile işler. Ağır (~10 MB) WASM modülü sadece bir DWG
- * seçildiğinde, dinamik import ile yüklenir — ana paket boyutunu etkilemez.
- * Herhangi bir adımda başarısız olursa `null` döner (çağıran taraf geri dönüş
- * yöntemlerine geçer) — asla tahmini/uydurma veri üretmez.
+ * `libredwg.dwg_write_dxf()` SENKRON bir WASM çağrısıdır — büyük/karmaşık gerçek
+ * DWG dosyalarında saniyeler sürebilir ve bu süre boyunca çağrıldığı thread'i
+ * tamamen kilitler (event loop'a geri dönemez). Ana thread'de çağrılırsa tarayıcı
+ * "Sayfa Yanıt Vermiyor" gösterir — kullanıcının bildirdiği donma tam olarak buydu.
+ * Bu yüzden TÜM dönüşüm (WASM + ağır DXF ayrıştırma/grafik filtreleme) bir Web
+ * Worker'da (`dwgConvertWorker.ts`) çalıştırılır; kilitlenen sadece o arka plan
+ * thread'i olur, sayfa/UI tamamen duyarlı kalır.
+ */
+function runDwgConvertWorker(buffer: ArrayBuffer, wasmDir: string): Promise<DwgWorkerResponse> {
+  return new Promise((resolve, reject) => {
+    let worker: Worker;
+    try {
+      worker = new Worker(new URL("./dwgConvertWorker.ts", import.meta.url), { type: "module" });
+    } catch (err) {
+      reject(err);
+      return;
+    }
+
+    const timeoutId = setTimeout(() => {
+      worker.terminate();
+      reject(new Error("LibreDWG dönüşümü zaman aşımına uğradı (90 saniye)"));
+    }, 90000);
+
+    worker.onmessage = (e: MessageEvent<DwgWorkerResponse>) => {
+      clearTimeout(timeoutId);
+      resolve(e.data);
+      worker.terminate();
+    };
+    worker.onerror = (e) => {
+      clearTimeout(timeoutId);
+      reject(e.error ?? new Error(e.message || "DWG worker hatası"));
+      worker.terminate();
+    };
+    const req: DwgWorkerRequest = { buffer, wasmDir };
+    worker.postMessage(req, [buffer]);
+  });
+}
+
+/**
+ * Gerçek DWG çözümlemesi: LibreDWG WASM ile dosyayı DXF'e çevirir (Worker içinde,
+ * bkz. yukarısı), sonucu doğrudan `vectorTrace` katmanına yazar — Wall/Corner/Room
+ * ÜRETMEZ (§ "otomatik tanıma yapmasın, dosyayı olduğu gibi açsın"). Ağır (~10 MB)
+ * WASM modülü sadece bir DWG seçildiğinde, dinamik import ile yüklenir — ana paket
+ * boyutunu etkilemez. Herhangi bir aşamada başarısız olursa `null` döner (çağıran
+ * taraf geri dönüş yöntemlerine geçer) — asla tahmini/uydurma veri üretmez.
  */
 async function tryRealDwgConversion(file: File, headerStr: string): Promise<DwgImportResult | null> {
   try {
-    const { LibreDwg } = await import("@mlightcad/libredwg-web");
-    const libredwg = await LibreDwg.create(LIBREDWG_WASM_DIR);
     const buffer = await file.arrayBuffer();
-    const dxfBytes = libredwg.dwg_write_dxf(buffer);
-    if (!dxfBytes || dxfBytes.length === 0) return null;
-
-    const dxfText = new TextDecoder("utf-8", { fatal: false }).decode(dxfBytes);
-    const dxfFile = new File([dxfText], file.name.replace(/\.dwg$/i, ".dxf"), { type: "text/plain" });
-    // parseDxfFile, hiç varlık bulamazsa hata fırlatır — bu durumda da geri dönüş
-    // yöntemlerine geçilecek (aşağıdaki catch bloğu yakalar).
-    const vectorResult = await parseDxfFile(dxfFile);
+    const response = await runDwgConvertWorker(buffer, LIBREDWG_WASM_DIR);
+    if (!response.ok) return null;
 
     return {
       kind: "vector",
-      apply: vectorResult.apply,
-      get wallCount() {
-        return vectorResult.wallCount;
-      },
+      apply: (variant) => applyTraceSegments(variant, response.segments),
+      segmentCount: response.segments.length,
       success: true,
       message:
         `DWG dosyası (${file.name} — ${headerStr}) LibreDWG ile GERÇEK vektör verisine dönüştürülüp ` +
-        `içe aktarıldı. ${vectorResult.scaleNote}`,
+        `kroki olarak eklendi (hiçbir otomatik duvar/oda ataması yapılmadı). ${response.scaleNote}`,
     };
   } catch (err) {
     // eslint-disable-next-line no-console
@@ -119,10 +146,13 @@ export async function parseDwgFile(file: File): Promise<DwgImportResult> {
   const dxfLines: { p1: Pt; p2: Pt }[] = [];
 
   let searchFrom = 0;
-  while (true) {
+  let attempts = 0;
+  // Sıkıştırılmış ikili gürültüde sonsuz döngü ve donmayı engellemek için taramayı 1000 deneme ile sınırlıyoruz
+  while (attempts < 1000) {
     const lineIdx = fullText.indexOf("LINE", searchFrom);
     if (lineIdx === -1) break;
     searchFrom = lineIdx + 4;
+    attempts++;
 
     const chunk = fullText.substring(lineIdx, lineIdx + 500);
     const x10 = extractGroupCode(chunk, "10");
@@ -162,16 +192,21 @@ export async function parseDwgFile(file: File): Promise<DwgImportResult> {
   if (!imageDataUrl) {
     for (let i = 0; i < Math.min(bytes.length - 8, 65536); i++) {
       if (bytes[i] === 0x89 && bytes[i + 1] === 0x50 && bytes[i + 2] === 0x4e && bytes[i + 3] === 0x47) {
-        let endIdx = bytes.length;
-        for (let j = i + 8; j < bytes.length - 8; j++) {
+        // En fazla 500 KB'lık bir thumbnail arıyoruz, tüm dosyayı tarayıp sayfayı dondurmasını engelliyoruz
+        let endIdx = Math.min(bytes.length, i + 500000);
+        let foundEnd = false;
+        for (let j = i + 8; j < endIdx - 8; j++) {
           if (bytes[j] === 0x49 && bytes[j + 1] === 0x45 && bytes[j + 2] === 0x4e && bytes[j + 3] === 0x44) {
             endIdx = j + 8;
+            foundEnd = true;
             break;
           }
         }
-        const imgBytes = bytes.slice(i, endIdx);
-        imageDataUrl = await blobToDataUrl(new Blob([imgBytes], { type: "image/png" }));
-        break;
+        if (foundEnd) {
+          const imgBytes = bytes.slice(i, endIdx);
+          imageDataUrl = await blobToDataUrl(new Blob([imgBytes], { type: "image/png" }));
+          break;
+        }
       }
     }
   }
@@ -191,7 +226,7 @@ export async function parseDwgFile(file: File): Promise<DwgImportResult> {
     return {
       kind: "raster",
       apply,
-      wallCount: 0,
+      segmentCount: 0,
       success: true,
       message:
         `DWG dosyasındaki (${headerStr}) gömülü küçük önizleme görseli arka plan olarak eklendi. ` +
@@ -209,29 +244,29 @@ export async function parseDwgFile(file: File): Promise<DwgImportResult> {
   return {
     kind: "none",
     apply: (v) => v,
-    wallCount: 0,
+    segmentCount: 0,
     success: false,
     message:
-      `DWG dosyası (${file.name} — ${headerStr}) okundu ancak içinden ne gerçek çizim verisi ne de ` +
-      `bir önizleme görseli çıkarılabildi (sıkıştırılmış ikili format, tarayıcıda tam çözümlenemiyor).\n\n` +
-      `Rastgele/tahmini bir çizim oluşturmak yerine bilgilendiriyoruz — yanlış bir plan, boş bir ` +
-      `ekrandan daha kötü olurdu.\n\n` +
-      `Çözüm:\n` +
-      `• AutoCAD, BricsCAD veya ücretsiz LibreCAD/DraftSight'ta dosyayı açıp "Farklı Kaydet → DXF" ` +
-      `olarak kaydedin (aynı çizim, sadece format değişir) — DXF burada tam destekleniyor.\n` +
-      `• Veya çizimi PDF/PNG/JPG olarak dışa aktarıp izleme görseli (arka plan) olarak yükleyin, ` +
-      `üzerinden elle çizin.`,
+      `DWG dosyası (${file.name} — ${headerStr}) okundu ancak içinden gerçek çizim verisi çıkarılamadı ` +
+      `(sıkıştırılmış ikili format, tarayıcıda tam çözümlenemedi). Rastgele/tahmini bir çizim oluşturmuyoruz ` +
+      `— yanlış bir plan, boş bir ekrandan daha kötü olurdu.`,
   };
 }
 
 // ── Yardımcı Fonksiyonlar ──
 
+// Regex nesnelerini döngü dışında önceden derleyerek performans kaybını önlüyoruz
+const GROUP_CODE_PATTERNS: Record<string, RegExp[]> = {
+  "10": [/[\r\n]\s*10\s*[\r\n]\s*([\-\d\.]+)/, /[\r\n]\s*10\s*[\r\n]\s*([\-\d\.]+)/],
+  "20": [/[\r\n]\s*20\s*[\r\n]\s*([\-\d\.]+)/, /[\r\n]\s*20\s*[\r\n]\s*([\-\d\.]+)/],
+  "11": [/[\r\n]\s*11\s*[\r\n]\s*([\-\d\.]+)/, /[\r\n]\s*11\s*[\r\n]\s*([\-\d\.]+)/],
+  "21": [/[\r\n]\s*21\s*[\r\n]\s*([\-\d\.]+)/, /[\r\n]\s*21\s*[\r\n]\s*([\-\d\.]+)/],
+};
+
 function extractGroupCode(chunk: string, code: string): number | null {
-  const patterns = [
-    new RegExp(`\\n\\s*${code}\\s*\\n\\s*([\\-\\d\\.]+)`, "m"),
-    new RegExp(`\\r\\n\\s*${code}\\s*\\r\\n\\s*([\\-\\d\\.]+)`, "m"),
-  ];
-  for (const re of patterns) {
+  const reList = GROUP_CODE_PATTERNS[code];
+  if (!reList) return null;
+  for (const re of reList) {
     const m = chunk.match(re);
     if (m) {
       const val = parseFloat(m[1]);
@@ -269,45 +304,19 @@ function buildFromSegments(segments: { p1: Pt; p2: Pt }[], fileName: string, hea
     scale = 0.1; // muhtemelen milimetre → cm
   }
 
-  const segsToUse = segments.map((s) => ({
-    p1: { x: Math.round((s.p1.x - minX) * scale), y: Math.round((s.p1.y - minY) * scale) },
-    p2: { x: Math.round((s.p2.x - minX) * scale), y: Math.round((s.p2.y - minY) * scale) },
+  const traceSegments: TraceSegment[] = segments.map((s) => ({
+    a: { x: Math.round((s.p1.x - minX) * scale), y: Math.round((s.p1.y - minY) * scale) },
+    b: { x: Math.round((s.p2.x - minX) * scale), y: Math.round((s.p2.y - minY) * scale) },
   }));
-
-  let wallCount = 0;
-  const apply = (variant: FloorVariantData): FloorVariantData => {
-    let vv = variant;
-    for (const seg of segsToUse) {
-      let c1 = M.findNearestCorner(vv, seg.p1);
-      if (!c1) {
-        const [n1, id1] = M.addCorner(vv, seg.p1);
-        vv = n1;
-        c1 = id1;
-      }
-      let c2 = M.findNearestCorner(vv, seg.p2);
-      if (!c2) {
-        const [n2, id2] = M.addCorner(vv, seg.p2);
-        vv = n2;
-        c2 = id2;
-      }
-      if (c1 === c2) continue;
-      const before = vv;
-      vv = M.addWall(vv, c1, c2, 20);
-      if (vv !== before) wallCount++;
-    }
-    return vv;
-  };
 
   return {
     kind: "vector",
-    apply,
-    get wallCount() {
-      return wallCount;
-    },
-    success: segsToUse.length > 0,
+    apply: (variant) => applyTraceSegments(variant, traceSegments),
+    segmentCount: traceSegments.length,
+    success: traceSegments.length > 0,
     message:
-      `DWG dosyası (${fileName} — ${headerStr}) içindeki gömülü DXF metin bloğundan ${segsToUse.length} ` +
-      `duvar segmenti bulundu ve tuvale yerleştirildi. Ölçek birimi dosyada standart olmadığından ` +
-      `otomatik bir varsayım (×${scale}) uygulandı — ölçüleri kontrol edin.`,
+      `DWG dosyası (${fileName} — ${headerStr}) içindeki gömülü DXF metin bloğundan ${traceSegments.length} ` +
+      `çizgi segmenti bulundu ve kroki olarak eklendi (hiçbir otomatik duvar/oda ataması yapılmadı). ` +
+      `Ölçek birimi dosyada standart olmadığından otomatik bir varsayım (×${scale}) uygulandı — ölçüleri kontrol edin.`,
   };
 }

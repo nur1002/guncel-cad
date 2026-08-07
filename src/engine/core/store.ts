@@ -10,17 +10,17 @@ import {
   type ParselInfo,
   type PlacedComponent,
   type Wall,
-} from "../data/model";
+} from "../../data/model";
 import {
   defaultRoomTypes,
   colorForNewRoomType,
   DEFAULT_ROOM_TYPE_ID,
   type RoomCategory,
   type RoomTypeConfig,
-} from "../data/roomTypes";
-import { defaultCatalog, type CatalogCategory } from "../data/componentCatalog";
-import { defaultCategoryTabs, type CategoryTab } from "../data/categoryTabs";
-import { wallMaterials, floorMaterials, type MaterialConfig } from "../data/materials";
+} from "../../data/roomTypes";
+import { defaultCatalog, type CatalogCategory } from "../../data/componentCatalog";
+import { defaultCategoryTabs, type CategoryTab } from "../../data/categoryTabs";
+import { wallMaterials, floorMaterials, type MaterialConfig } from "../../data/materials";
 import * as M from "./mutations";
 import { runMissingDoorCheck, runTopologyCheck } from "./qaChecks";
 
@@ -28,6 +28,7 @@ export type Tool =
   | "select"
   | "wall"
   | "room"
+  | "roomRect"
   | "point"
   | "polygon"
   | "rotrect"
@@ -144,6 +145,11 @@ interface AppState {
   snapEnabled: boolean;
   otherFloorsMode: "hidden" | "ghost" | "visible";
 
+  // Profesyonel CAD çizim ayarları
+  wallRenderMode: "centerline" | "doubleline" | "thick";
+  continuousDrawing: boolean;
+  orthoEnabled: boolean;
+
   undoStack: Command[];
   redoStack: Command[];
   undo: () => void;
@@ -185,6 +191,19 @@ interface AppState {
   copySelectionToClipboard: () => void;
   pasteClipboard: () => void;
   mirrorSelection: (axis: "vertical" | "horizontal") => void;
+  rotateSelection: (angleDeg: number) => void;
+
+  // Duvar/oda tık-tık-tık zincir çizimi aktif mi? CanvasEditor'daki zincir durumu
+  // (yerel ref) burada aynalanır, çünkü App.tsx'teki global 'S' kısayolu (Snap
+  // aç/kapat) ile CanvasEditor'daki 'S' (zinciri durdur) kısayolunu ayrı birer
+  // `window` keydown listener'ıyla çözmeye çalışmak, dinleyici KAYIT SIRASINA bağlı
+  // kırılgan bir davranış üretiyordu (araç değişince CanvasEditor'ın efekti yeniden
+  // kurulup App.tsx'inkinin ARKASINA düşüyor, ikisi de tetikleniyordu). Tek bir
+  // global handler + paylaşılan bu bayrak, sıralamadan bağımsız kesin bir çözüm.
+  isChainDrawingActive: boolean;
+  setChainDrawingActive: (active: boolean) => void;
+  stopDrawRequestId: number;
+  requestStopDraw: () => void;
 
   saveProjectToLocalStorage: () => void;
   setPlanMode: (mode: PlanMode) => void;
@@ -196,6 +215,9 @@ interface AppState {
   setGridStepCm: (stepCm: number) => void;
   toggleGridVisible: () => void;
   toggleSnapEnabled: () => void;
+  setWallRenderMode: (mode: "centerline" | "thick") => void;
+  toggleContinuousDrawing: () => void;
+  toggleOrtho: () => void;
 
   addRoomType: (label: string) => string;
   addFloor: () => void;
@@ -242,7 +264,13 @@ export const useStore = create<AppState>((set, get) => ({
     originY: 0,
   },
   setParselInfo: (parselPartial) =>
-    set((s) => ({ parsel: { ...s.parsel, ...parselPartial } })),
+    set((s) => {
+      const merged = { ...s.parsel, ...parselPartial };
+      // Alan her zaman genişlik×derinlik'ten hesaplanır; ayrı bir "alan" girişi olmadığı
+      // için bu ikisi asla birbirinden bağımsız/tutarsız (stale) kalmamalı.
+      const areaM2 = Math.round(((merged.widthCm / 100) * (merged.lengthCm / 100)) * 100) / 100;
+      return { parsel: { ...merged, areaM2 } };
+    }),
 
   pages: initialPagesList,
   activePageId: initialPagesList[2].id, // Zemin Kat
@@ -388,6 +416,14 @@ export const useStore = create<AppState>((set, get) => ({
   gridSnapEnabled: true,
   snapEnabled: true,
   otherFloorsMode: "ghost",
+
+  // Profesyonel CAD çizim ayarları
+  // Varsayılan HER ZAMAN "centerline" (ince tek çizgi) olmalı — kullanıcı defalarca
+  // "çift çizgili istemiyorum" dedi. Kullanıcı isterse üstteki araç çubuğundan
+  // doubleline/thick'e geçebilir, ama varsayılan asla o olmamalı.
+  wallRenderMode: "centerline",
+  continuousDrawing: false,
+  orthoEnabled: false,
 
   undoStack: [],
   redoStack: [],
@@ -613,6 +649,10 @@ export const useStore = create<AppState>((set, get) => ({
           cornerIds.add(w.b);
         }
       }
+      if (sel.type === "room") {
+        const r = variant.rooms[sel.id];
+        if (r) for (const cid of r.cornerLoop) cornerIds.add(cid);
+      }
       if (sel.type === "component") {
         const c = variant.components[sel.id];
         if (c && c.konum.kind === "zemin") floorCompIds.add(c.id);
@@ -630,6 +670,60 @@ export const useStore = create<AppState>((set, get) => ({
     }
     s.updateVariant((v) => M.mirrorSelectedEntities(v, [...cornerIds], [...floorCompIds], axis, centerVal));
   },
+  rotateSelection: (angleDeg) => {
+    const s = get();
+    const variant = s.currentVariant();
+    const selected: Selection[] = s.multiSelection.length > 0 ? s.multiSelection : s.selection ? [s.selection] : [];
+    if (selected.length === 0) return;
+    const cornerIds = new Set<ID>();
+    const floorCompIds = new Set<ID>();
+    for (const sel of selected) {
+      if (sel.type === "corner") cornerIds.add(sel.id);
+      if (sel.type === "wall") {
+        const w = variant.walls[sel.id];
+        if (w) {
+          cornerIds.add(w.a);
+          cornerIds.add(w.b);
+        }
+      }
+      if (sel.type === "room") {
+        const r = variant.rooms[sel.id];
+        if (r) for (const cid of r.cornerLoop) cornerIds.add(cid);
+      }
+      if (sel.type === "component") {
+        const c = variant.components[sel.id];
+        if (c && c.konum.kind === "zemin") floorCompIds.add(c.id);
+      }
+    }
+    if (cornerIds.size === 0 && floorCompIds.size === 0) return;
+
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (const id of cornerIds) {
+      const c = variant.corners[id];
+      if (c) {
+        xs.push(c.x);
+        ys.push(c.y);
+      }
+    }
+    for (const id of floorCompIds) {
+      const c = variant.components[id];
+      if (c && c.konum.kind === "zemin") {
+        xs.push(c.konum.x);
+        ys.push(c.konum.y);
+      }
+    }
+    if (xs.length === 0) return;
+    const pivot = {
+      x: (Math.min(...xs) + Math.max(...xs)) / 2,
+      y: (Math.min(...ys) + Math.max(...ys)) / 2,
+    };
+    s.updateVariant((v) => M.rotateSelectedEntities(v, [...cornerIds], [...floorCompIds], angleDeg, pivot));
+  },
+  isChainDrawingActive: false,
+  setChainDrawingActive: (active) => set({ isChainDrawingActive: active }),
+  stopDrawRequestId: 0,
+  requestStopDraw: () => set((s) => ({ stopDrawRequestId: s.stopDrawRequestId + 1, isChainDrawingActive: false })),
   saveProjectToLocalStorage: () => {
     const s = get();
     const payload = { pages: s.pages, parsel: s.parsel, roomTypes: s.roomTypes, catalog: s.catalog };
@@ -647,6 +741,9 @@ export const useStore = create<AppState>((set, get) => ({
   setGridStepCm: (stepCm) => set({ gridStepCm: stepCm }),
   toggleGridVisible: () => set((s) => ({ gridVisible: !s.gridVisible })),
   toggleSnapEnabled: () => set((s) => ({ snapEnabled: !s.snapEnabled })),
+  setWallRenderMode: (mode) => set({ wallRenderMode: mode }),
+  toggleContinuousDrawing: () => set((s) => ({ continuousDrawing: !s.continuousDrawing })),
+  toggleOrtho: () => set((s) => ({ orthoEnabled: !s.orthoEnabled })),
 
   addRoomType: (label) => {
     const s = get();

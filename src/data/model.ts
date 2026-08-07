@@ -95,6 +95,31 @@ export interface BackgroundImage {
   locked: boolean; // kilitliyken canvas'ta seçilip taşınamaz
 }
 
+/**
+ * DWG/DXF içe aktarımından gelen, YORUMLANMAMIŞ ham çizgi kroki katmanı (§ "otomatik
+ * tanıma yapmasın, dosyayı olduğu gibi açsın"). Wall/Corner/Room nesnesi ÜRETİLMEZ —
+ * yalnızca dosyadaki çizgiler aynen, ince referans çizgileri olarak gösterilir; duvar/oda
+ * algılamasına girmez. Kullanıcı isterse üzerinden elle çizer.
+ *
+ * Yerleştirme akışı (§ "Bounding box → parsel merkezi → sürükle → döndür → Parsele
+ * Yerleştir"): `segments` krokinin KENDİ bbox MERKEZİNE göre yerel koordinatlardır
+ * (0,0 = merkez); `x,y,rotationDeg,scale` bu merkezin dünyadaki konum/açı/ölçek
+ * dönüşümüdür. `locked=false` iken tuvalde sürüklenip döndürülebilir; "Parsele
+ * Yerleştir" ile `locked=true` olur ve dönüşüm projeye (undo/redo'ya) kaydedilmiş olur.
+ */
+export interface VectorTrace {
+  segments: { a: { x: number; y: number }; b: { x: number; y: number } }[];
+  widthCm: number; // yerel bbox genişliği (rotasyon/ölçek uygulanmadan önce)
+  heightCm: number;
+  x: number; // bbox merkezinin dünya konumu
+  y: number;
+  rotationDeg: number;
+  scale: number;
+  opacity: number;
+  visible: boolean;
+  locked: boolean;
+}
+
 export interface ParselInfo {
   areaM2: number; // m² (örn. 5000)
   widthCm: number; // cm (örn. 10000 = 100m)
@@ -112,6 +137,7 @@ export interface FloorVariantData {
   components: Record<ID, PlacedComponent>;
   textAnnotations: Record<ID, TextAnnotation>;
   backgroundImage: BackgroundImage | null;
+  vectorTrace: VectorTrace | null;
   bagimsizBolumler: Record<ID, BagimsizBolum>;
 }
 
@@ -150,6 +176,7 @@ export function emptyVariant(name: string): FloorVariantData {
     components: {},
     textAnnotations: {},
     backgroundImage: null,
+    vectorTrace: null,
     bagimsizBolumler: {},
   };
 }
@@ -271,6 +298,7 @@ export function cloneVariant(variant: FloorVariantData, name: string): FloorVari
     components,
     textAnnotations,
     backgroundImage: null,
+    vectorTrace: null,
     bagimsizBolumler,
   };
 }

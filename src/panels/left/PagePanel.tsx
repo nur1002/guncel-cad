@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useStore } from "../engine/store";
-import type { Page } from "../data/model";
+import { useStore } from "../../engine/core/store";
+import type { Page } from "../../data/model";
 
 const PAGE_TYPES = [
   { id: "siginak", label: "Sığınak" },
@@ -100,7 +100,10 @@ export default function PagePanel() {
         <div className="parsel-info-card">
           <div className="parsel-stat-row">
             <span>📍 Parsel Alanı:</span>
-            <strong>{parsel.areaM2} m² ({(parsel.widthCm / 100).toFixed(0)}m x {(parsel.lengthCm / 100).toFixed(0)}m)</strong>
+            <strong>
+              {((parsel.widthCm / 100) * (parsel.lengthCm / 100)).toLocaleString("tr-TR", { maximumFractionDigits: 1 })} m²
+              ({(parsel.widthCm / 100).toFixed(0)}m x {(parsel.lengthCm / 100).toFixed(0)}m)
+            </strong>
           </div>
           <div className="parsel-stat-row">
             <span>🌐 Sabit Origin (0,0):</span>

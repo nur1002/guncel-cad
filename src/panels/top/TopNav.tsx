@@ -1,11 +1,11 @@
 import { useState } from "react";
-import { useStore } from "../engine/store";
+import { useStore } from "../../engine/core/store";
 import {
   ExportModal,
   NewProjectModal,
   OpenProjectModal,
   ProjectInfoModal,
-} from "./Modals";
+} from "../../modals/Modals";
 
 export default function TopNav() {
   const planMode = useStore((s) => s.planMode);

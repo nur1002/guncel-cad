@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { PointerLockControls } from "three/examples/jsm/controls/PointerLockControls.js";
-import { useStore } from "../engine/store";
-import { roomAreaM2 } from "../engine/render2d";
-import { dist } from "../engine/geometry";
+import { useStore } from "../engine/core/store";
+import { roomAreaM2 } from "../engine/drawing/render2d";
+import { dist } from "../engine/drawing/geometry";
 import { getMaterial } from "../data/materials";
 import type { Corner, FloorVariantData, PlacedComponent, Wall, WallPlacement } from "../data/model";
 
