@@ -32,9 +32,9 @@ export interface VectorTraceImportResult {
  * Parsel merkezine yerleştirme (x,y varsayılanı), parsel bilgisine sahip tek yer olan
  * `importDispatch.ts` tarafından `apply()` sonrası ayrıca yapılır.
  */
-export function applyTraceSegments(variant: FloorVariantData, segments: TraceSegment[], debugInfo?: any): FloorVariantData {
+export function applyTraceSegments(variant: FloorVariantData, segments: TraceSegment[]): FloorVariantData {
   const centered = centerTraceSegments(segments);
-  return M.setVectorTrace(variant, centered.segments, centered.widthCm, centered.heightCm, debugInfo);
+  return M.setVectorTrace(variant, centered.segments, centered.widthCm, centered.heightCm);
 }
 
 export interface VectorImportResult {
@@ -215,10 +215,10 @@ export function isDxfFile(file: File): boolean {
 
 export async function parseDxfFile(file: File): Promise<VectorTraceImportResult> {
   const text = await file.text();
-  const { loops, scaleNote, debugInfo } = dxfTextToScaledLoops(text);
+  const { loops, scaleNote } = dxfTextToScaledLoops(text);
   const segments = loopsToTraceSegments(loops);
   return {
-    apply: (variant) => applyTraceSegments(variant, segments, debugInfo),
+    apply: (variant) => applyTraceSegments(variant, segments),
     segmentCount: segments.length,
     scaleNote,
   };

@@ -3,8 +3,8 @@
 
 import type { Corner, FloorVariantData, PlacedComponent, Room, VectorTrace, Wall } from "../../data/model";
 import type { RoomTypeConfig } from "../../data/roomTypes";
-import { COLOR_BLUEPRINT, COLOR_CANVAS_BG, COLOR_GRID, COLOR_GRID_MAJOR, COLOR_INK, COLOR_ORIGIN_AXIS, COLOR_REF_BAND, COLOR_RUST } from "../../styles/theme";
-import { applyTransform, cm2ToM2, dist, perpendicular, polygonAreaCm2, polygonCentroid, type Pt } from "./geometry";
+import { COLOR_BLUEPRINT, COLOR_GRID, COLOR_INK, COLOR_RUST } from "../../styles/theme";
+import { cm2ToM2, dist, perpendicular, polygonAreaCm2, polygonCentroid, type Pt } from "./geometry";
 
 export interface View2D {
   pxPerCm: number;
@@ -53,62 +53,30 @@ export function drawVectorTrace(ctx: CanvasRenderingContext2D, view: View2D, tra
   const originScreen = worldToScreen(view, { x: trace.x, y: trace.y });
   const s = trace.scale * view.pxPerCm;
 
-  // Group segments by category
-  const structural: typeof trace.segments = [];
-  const hatchSolid: typeof trace.segments = [];
-  const helperBg: typeof trace.segments = [];
-
-  for (const seg of trace.segments) {
-    if (seg.type === "HATCH" || seg.type === "SOLID") {
-      hatchSolid.push(seg);
-    } else if (seg.type === "IMAGE" || seg.type === "WIPEOUT" || seg.type === "UNDERLAY") {
-      helperBg.push(seg);
-    } else {
-      structural.push(seg);
-    }
-  }
-
   ctx.save();
   ctx.globalAlpha = trace.opacity;
   ctx.translate(originScreen.x, originScreen.y);
   ctx.rotate((trace.rotationDeg * Math.PI) / 180);
   ctx.scale(s, s);
+  ctx.strokeStyle = trace.locked ? "#334155" : "#2563EB";
   ctx.lineWidth = 1 / s;
-
-  const renderGroup = (segs: typeof trace.segments, color: string, dash?: number[]) => {
-    if (segs.length === 0) return;
-    ctx.save();
-    ctx.strokeStyle = color;
-    if (dash) {
-      ctx.setLineDash(dash.map((v) => v / s));
-    }
-    ctx.beginPath();
-    for (const seg of segs) {
-      ctx.moveTo(seg.a.x, seg.a.y);
-      ctx.lineTo(seg.b.x, seg.b.y);
-    }
-    ctx.stroke();
-    ctx.restore();
-  };
-
-  // 1. Helper/Bg group (dashed, very light gray)
-  renderGroup(helperBg, "rgba(148, 163, 184, 0.25)", [4, 4]);
-
-  // 2. Hatch/Solid group (solid, light slate)
-  renderGroup(hatchSolid, "rgba(148, 163, 184, 0.45)");
-
-  // 3. Structural group (default blue or locked slate)
-  const defaultColor = trace.locked ? "#475569" : "#2563EB";
-  renderGroup(structural, defaultColor);
-
+  ctx.beginPath();
+  for (const seg of trace.segments) {
+    ctx.moveTo(seg.a.x, seg.a.y);
+    ctx.lineTo(seg.b.x, seg.b.y);
+  }
+  ctx.stroke();
   ctx.restore();
 
   if (!trace.locked) {
-    // Tek kaynak dönüşüm (applyTransform) — bkz. geometry.ts: render, snap ve
-    // döndürme kolu hit-test'i AYNI matematiği kullanır, aralarında sapma olmaz.
-    const halfW = trace.widthCm / 2;
-    const halfH = trace.heightCm / 2;
-    const corner = (lx: number, ly: number) => worldToScreen(view, applyTransform({ x: lx, y: ly }, trace));
+    const halfW = (trace.widthCm * trace.scale) / 2;
+    const halfH = (trace.heightCm * trace.scale) / 2;
+    const rad = (trace.rotationDeg * Math.PI) / 180;
+    const corner = (lx: number, ly: number) => {
+      const rx = lx * Math.cos(rad) - ly * Math.sin(rad);
+      const ry = lx * Math.sin(rad) + ly * Math.cos(rad);
+      return worldToScreen(view, { x: trace.x + rx, y: trace.y + ry });
+    };
     const c1 = corner(-halfW, -halfH);
     const c2 = corner(halfW, -halfH);
     const c3 = corner(halfW, halfH);
@@ -124,11 +92,8 @@ export function drawVectorTrace(ctx: CanvasRenderingContext2D, view: View2D, tra
     ctx.stroke();
     ctx.restore();
 
-    // Döndürme kolu: üst kenarın ortasından dışarı doğru bir tutamaç. 30px'lik ekran
-    // boşluğu sabit kalsın diye yerel ofset trace.scale'e bölünür (applyTransform
-    // içeride zaten scale ile çarpacak).
-    const handleGapLocal = 30 / (view.pxPerCm * (trace.scale || 1));
-    const handleLocal = corner(0, -halfH - handleGapLocal);
+    // Döndürme kolu: üst kenarın ortasından dışarı doğru bir tutamaç.
+    const handleLocal = corner(0, -halfH - 30 / view.pxPerCm);
     const topMid = corner(0, -halfH);
     ctx.save();
     ctx.strokeStyle = "#2563EB";
@@ -186,7 +151,7 @@ export function drawGrid(
   view: View2D,
   options: { visible?: boolean; baseStepCm?: number } = {}
 ) {
-  ctx.fillStyle = COLOR_CANVAS_BG;
+  ctx.fillStyle = "#FBFAF7";
   ctx.fillRect(0, 0, view.width, view.height);
 
   if (options.visible === false) return;
@@ -219,7 +184,7 @@ export function drawGrid(
   ctx.stroke();
 
   if (stepPx >= TARGET_STEP_PX * 0.9) {
-    ctx.strokeStyle = COLOR_GRID_MAJOR;
+    ctx.strokeStyle = "#D8DBDD";
     ctx.lineWidth = 1;
     ctx.beginPath();
     ix = 0;
@@ -240,7 +205,7 @@ export function drawGrid(
   // Dünya orijini (0,0) her zaman belirgin bir çizgi çifti ile işaretlenir — sonsuz
   // tuvalde konum referansı verir.
   if (origin.x > -20 && origin.x < view.width + 20) {
-    ctx.strokeStyle = COLOR_ORIGIN_AXIS;
+    ctx.strokeStyle = "#C7CBCD";
     ctx.lineWidth = 1.25;
     ctx.beginPath();
     ctx.moveTo(origin.x, 0);
@@ -248,7 +213,7 @@ export function drawGrid(
     ctx.stroke();
   }
   if (origin.y > -20 && origin.y < view.height + 20) {
-    ctx.strokeStyle = COLOR_ORIGIN_AXIS;
+    ctx.strokeStyle = "#C7CBCD";
     ctx.lineWidth = 1.25;
     ctx.beginPath();
     ctx.moveTo(0, origin.y);
@@ -370,17 +335,13 @@ export function drawRoom(
   ctx.beginPath();
   screenPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
   ctx.closePath();
-  ctx.fillStyle = roomType.color + (selected ? "22" : "0D");
+  ctx.fillStyle = roomType.color + (selected ? "CC" : "99");
   ctx.fill();
-  
-  ctx.save();
-  ctx.strokeStyle = selected ? COLOR_RUST : roomType.color + "66";
-  ctx.lineWidth = selected ? 2 : 1;
-  if (!selected) {
-    ctx.setLineDash([4, 4]);
+  if (selected) {
+    ctx.strokeStyle = COLOR_RUST;
+    ctx.lineWidth = 2;
+    ctx.stroke();
   }
-  ctx.stroke();
-  ctx.restore();
 
   const areaM2 = roomAreaM2(room, corners);
   const centroidWorld = polygonCentroid(worldPts);
@@ -705,7 +666,7 @@ export function drawComponent(
   ctx.beginPath();
   quad.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
   ctx.closePath();
-  ctx.fillStyle = COLOR_CANVAS_BG;
+  ctx.fillStyle = "#FBFAF7";
   ctx.fill();
   ctx.strokeStyle = selected ? COLOR_RUST : isDoor ? COLOR_RUST : COLOR_BLUEPRINT;
   ctx.lineWidth = selected ? 3 : 2;
@@ -775,7 +736,7 @@ export function drawReferenceGrid(ctx: CanvasRenderingContext2D, view: View2D, s
   if (stepPx < 26) return; // çok sıkışıksa etiket basma
 
   ctx.save();
-  ctx.fillStyle = COLOR_REF_BAND;
+  ctx.fillStyle = "#F2F0EA";
   ctx.fillRect(0, 0, view.width, BAND);
   ctx.fillRect(0, view.height - BAND, view.width, BAND);
   ctx.fillRect(0, 0, BAND, view.height);

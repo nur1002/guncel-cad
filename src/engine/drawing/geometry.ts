@@ -6,59 +6,6 @@ export interface Pt {
   y: number;
 }
 
-/**
- * Bir yerleştirme dönüşümü (ör. içe aktarılan DWG/DXF krokisinin parsele
- * yerleştirilmesi): yerel (local) koordinatları SIRAYLA ölçekleyip döndürüp
- * öteler — local → scale → rotation → translation → dünya/parsel koordinatı
- * (§ "Transform sırası" — bu sıra bozulmamalı). Render (`drawVectorTrace`),
- * snap (`traceLocalToWorld`) ve sürükleme/döndürme kolu hit-test'i (CanvasEditor)
- * AYNI bu fonksiyonu kullanmalı — daha önce bu üçü birbirinden bağımsız, elle
- * yazılmış aynı matematiği tekrarlıyordu ve biri (döndürme kolu) diğerinden
- * işaret hatasıyla sapmıştı. Tek kaynak, bu sınıf hatayı yapısal olarak engeller.
- */
-export interface PlacementTransform {
-  x: number;
-  y: number;
-  rotationDeg: number;
-  scale: number;
-}
-
-export function applyTransform(local: Pt, t: PlacementTransform): Pt {
-  const rad = (t.rotationDeg * Math.PI) / 180;
-  const sx = local.x * t.scale;
-  const sy = local.y * t.scale;
-  return {
-    x: t.x + sx * Math.cos(rad) - sy * Math.sin(rad),
-    y: t.y + sx * Math.sin(rad) + sy * Math.cos(rad),
-  };
-}
-
-/** `applyTransform`'un tersi: bir dünya noktasını yerleştirmenin yerel koordinatına çevirir. */
-export function invertTransform(world: Pt, t: PlacementTransform): Pt {
-  const rad = (-t.rotationDeg * Math.PI) / 180;
-  const dx = world.x - t.x;
-  const dy = world.y - t.y;
-  const rx = dx * Math.cos(rad) - dy * Math.sin(rad);
-  const ry = dx * Math.sin(rad) + dy * Math.cos(rad);
-  const scale = t.scale === 0 ? 1 : t.scale;
-  return { x: rx / scale, y: ry / scale };
-}
-
-/**
- * `rotationDeg` derece döndürülmüş bir (width×height) dikdörtgenin EKSENE PARALEL
- * (axis-aligned) sınırlayıcı kutusunun boyutu — "Rotation sonrasında bounding box
- * yeniden hesaplanmalı" (§9). Örn. 90°'de genişlik/yükseklik yer değiştirir.
- */
-export function rotatedBBoxExtent(width: number, height: number, rotationDeg: number): { width: number; height: number } {
-  const rad = (rotationDeg * Math.PI) / 180;
-  const cos = Math.abs(Math.cos(rad));
-  const sin = Math.abs(Math.sin(rad));
-  return {
-    width: width * cos + height * sin,
-    height: width * sin + height * cos,
-  };
-}
-
 export function dist(a: Pt, b: Pt): number {
   return Math.hypot(b.x - a.x, b.y - a.y);
 }

@@ -23,7 +23,6 @@ export interface Wall extends Traceable {
   b: ID; // Corner id
   thickness: number; // cm
   malzeme: string; // materials.ts / wallMaterials içindeki id
-  height?: number; // cm, opsiyonel duvar yüksekliği (oda yüksekliğinden bağımsız)
 }
 
 export interface Room extends Traceable {
@@ -109,7 +108,7 @@ export interface BackgroundImage {
  * Yerleştir" ile `locked=true` olur ve dönüşüm projeye (undo/redo'ya) kaydedilmiş olur.
  */
 export interface VectorTrace {
-  segments: { a: { x: number; y: number }; b: { x: number; y: number }; type?: string }[];
+  segments: { a: { x: number; y: number }; b: { x: number; y: number } }[];
   widthCm: number; // yerel bbox genişliği (rotasyon/ölçek uygulanmadan önce)
   heightCm: number;
   x: number; // bbox merkezinin dünya konumu
@@ -119,7 +118,6 @@ export interface VectorTrace {
   opacity: number;
   visible: boolean;
   locked: boolean;
-  debugInfo?: any;
 }
 
 export interface ParselInfo {
