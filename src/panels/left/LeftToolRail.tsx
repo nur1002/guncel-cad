@@ -3,9 +3,9 @@ import { useStore, type Tool } from "../../engine/core/store";
 import * as M from "../../engine/core/mutations";
 import { handleImportFile } from "../../engine/io/importDispatch";
 import { OpenProjectModal } from "../../modals/Modals";
-import { roomCategoryLabels, roomCategoryOrder } from "../../data/roomTypes";
 import { roomAreaM2 } from "../../engine/drawing/render2d";
-import { dist } from "../../engine/drawing/geometry";
+import { dist, rotatedBBoxExtent } from "../../engine/drawing/geometry";
+import { computePageSummaries } from "../../engine/drawing/reports";
 
 const THICKNESS_OPTIONS = [10, 15, 20, 25, 30];
 
@@ -35,28 +35,29 @@ const DRAWING_TOOL_ICONS: Record<string, React.ReactNode> = {
       <circle cx="20" cy="4" r="1.6" fill="currentColor" stroke="none" />
     </svg>
   ),
-  polygon: (
+  measure: (
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
-      <polygon points="12 3 21 9 18 20 6 20 3 9" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <line x1="3" y1="7" x2="3" y2="17" />
+      <line x1="21" y1="7" x2="21" y2="17" />
     </svg>
   ),
-  room: (
+  text: (
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M3 17l5-9 6 4 7-8" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="3" cy="17" r="1.6" fill="currentColor" stroke="none" />
-      <circle cx="8" cy="8" r="1.6" fill="currentColor" stroke="none" />
-      <circle cx="14" cy="12" r="1.6" fill="currentColor" stroke="none" />
-      <circle cx="21" cy="4" r="1.6" fill="currentColor" stroke="none" />
+      <path d="M4 7V4h16v3M9 20h6M12 4v16" />
     </svg>
   ),
-  roomRect: (
+  kapi: (
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="3" y="6" width="18" height="12" rx="1" />
+      <path d="M3 21h18M5 21V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16" />
+      <circle cx="15" cy="12" r="1.5" />
     </svg>
   ),
-  rotrect: (
+  pencere: (
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="5" y="7" width="14" height="10" rx="1" transform="rotate(-18 12 12)" />
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <line x1="12" y1="5" x2="12" y2="19" />
     </svg>
   ),
 };
@@ -96,45 +97,27 @@ const EDIT_TOOL_ICONS: Record<string, React.ReactNode> = {
 
 /** Sol raydaki "Katmanlar" sekmesinin içeriği: oda tipi paleti + çizim/düzenleme araçları. */
 function RoomAddPanel() {
-  const roomTypes = useStore((s) => s.roomTypes);
-  const activeRoomTypeId = useStore((s) => s.activeRoomTypeId);
-  const setActiveRoomTypeId = useStore((s) => s.setActiveRoomTypeId);
   const activeTool = useStore((s) => s.activeTool);
   const setTool = useStore((s) => s.setTool);
-  const addRoomType = useStore((s) => s.addRoomType);
+  const pendingPlacement = useStore((s) => s.pendingPlacement);
+  const setPendingPlacement = useStore((s) => s.setPendingPlacement);
   const deleteSelection = useStore((s) => s.deleteSelection);
   const copySelectionToClipboard = useStore((s) => s.copySelectionToClipboard);
   const pasteClipboard = useStore((s) => s.pasteClipboard);
   const mirrorSelection = useStore((s) => s.mirrorSelection);
   const rotateSelection = useStore((s) => s.rotateSelection);
-  const pushToast = useStore((s) => s.pushToast);
 
-  const ROOM_SHAPE_TOOLS: Tool[] = ["room", "roomRect", "polygon", "rotrect"];
-
-  const pickType = (id: string) => {
-    setActiveRoomTypeId(id);
-    // Zaten bir çizim şekli aracındaysak o araçta kal; değilse varsayılan olarak
-    // Dikdörtgen (Hızlı Oda) aracına geç.
-    if (!ROOM_SHAPE_TOOLS.includes(activeTool)) setTool("room");
-  };
-
-  const handleAddCustom = () => {
-    const name = window.prompt("Yeni oda tipi adı girin:");
-    if (name && name.trim()) {
-      const id = addRoomType(name.trim());
-      setActiveRoomTypeId(id);
-      setTool("room");
-      pushToast(`"${name.trim()}" tipi eklendi.`, "basari");
-    }
+  const placeItem = (catId: string, subId: string) => {
+    const overrides = { genislik: catId === "kapi" ? 90 : 120, yukseklik: 210 };
+    setPendingPlacement({ tip: catId, subtypeId: subId, overrides });
+    setTool("place");
   };
 
   const DRAWING_TOOLS: { id: Tool; label: string }[] = [
-    { id: "point", label: "Nokta" },
-    { id: "wall", label: "Çizgi" },
-    { id: "room", label: "Oda (Çizgi)" },
-    { id: "roomRect", label: "Oda (Dikdörtgen)" },
-    { id: "polygon", label: "Poligon" },
-    { id: "rotrect", label: "D.Dikdörtgen" },
+    { id: "wall", label: "Duvar Çiz" },
+    { id: "point", label: "Referans Noktası" },
+    { id: "measure", label: "Mesafe Ölç" },
+    { id: "text", label: "Not Ekle" },
   ];
 
   const EDIT_TOOLS: { id: string; label: string; onClick: () => void; active?: boolean }[] = [
@@ -154,37 +137,9 @@ function RoomAddPanel() {
 
   return (
     <div className="tools-panel-content">
-      {roomCategoryOrder.map((cat) => {
-        const typesInCat = roomTypes.filter((rt) => rt.category === cat);
-        if (typesInCat.length === 0) return null;
-        return (
-          <div key={cat}>
-            <div className="tool-section-title">{roomCategoryLabels[cat]}</div>
-            <div className="room-types-grid">
-              {typesInCat.map((rt) => (
-                <button
-                  key={rt.id}
-                  className={`room-type-card ${activeRoomTypeId === rt.id ? "room-type-card--active" : ""}`}
-                  onClick={() => pickType(rt.id)}
-                  title={rt.label}
-                >
-                  <span className="room-type-dot" style={{ background: rt.dotColor }} />
-                  <span className="room-type-name">{rt.shortLabel}</span>
-                </button>
-              ))}
-              {cat === "bagimsiz_bolum" && (
-                <button className="room-type-card room-type-card--add" onClick={handleAddCustom}>
-                  + Özel Oda
-                </button>
-              )}
-            </div>
-          </div>
-        );
-      })}
-
       <div>
         <div className="tool-section-title">Çizim Araçları</div>
-        <div className="tool-section-sub">Seçili oda tipi bu araçla çizilir: {roomTypes.find((r) => r.id === activeRoomTypeId)?.label ?? "—"}</div>
+        <div className="tool-section-sub">Duvar çizebilir, referans noktası yerleştirebilir veya ölçü alabilirsiniz.</div>
         <div className="tools-grid-3col">
           {DRAWING_TOOLS.map((t) => (
             <button
@@ -197,6 +152,24 @@ function RoomAddPanel() {
               <span className="cad-tool-label">{t.label}</span>
             </button>
           ))}
+          
+          <button
+            className={`cad-tool-card ${activeTool === "place" && pendingPlacement?.tip === "kapi" ? "cad-tool-card--active" : ""}`}
+            onClick={() => placeItem("kapi", "tek_kanat_kapi")}
+            title="Kapı Yerleştir"
+          >
+            <span className="cad-tool-icon">{DRAWING_TOOL_ICONS["kapi"]}</span>
+            <span className="cad-tool-label">Kapı Yerleştir</span>
+          </button>
+
+          <button
+            className={`cad-tool-card ${activeTool === "place" && pendingPlacement?.tip === "pencere" ? "cad-tool-card--active" : ""}`}
+            onClick={() => placeItem("pencere", "tek_kanat")}
+            title="Pencere Yerleştir"
+          >
+            <span className="cad-tool-icon">{DRAWING_TOOL_ICONS["pencere"]}</span>
+            <span className="cad-tool-label">Pencere Yerleştir</span>
+          </button>
         </div>
       </div>
 
@@ -307,7 +280,7 @@ function ComponentCatalogPanel() {
         </div>
       </div>
       {pendingPlacement && activeTool === "place" && (
-        <p className="tool-section-sub" style={{ padding: "6px 10px", borderTop: "1px solid #e2e8f0" }}>
+        <p className="tool-section-sub" style={{ padding: "6px 10px", borderTop: "1px solid var(--border-light)" }}>
           {category.placement === "zemin"
             ? "Odanın içine tıklayarak yerleştirin."
             : "Bir duvarın üzerine tıklayın (veya sürükleyerek genişliği belirleyin)."}
@@ -451,7 +424,7 @@ function DimensionPanel() {
                   onClick={() => selectSingle({ type: "wall", id: w.id })}
                 >
                   <span style={{ fontSize: 12 }}>Duvar {i + 1}</span>
-                  <span style={{ fontSize: 11, color: "#64748b" }}>{len} cm · {w.thickness} cm kalın</span>
+                  <span style={{ fontSize: 11, color: "var(--text-muted)" }}>{len} cm · {w.thickness} cm kalın</span>
                 </button>
               );
             })}
@@ -641,8 +614,17 @@ function ProjectSettingsPanel() {
               className="btn-modal-submit"
               style={{ width: "100%", marginTop: 8, padding: "9px 0", fontSize: 12, fontWeight: 700, background: "#16a34a" }}
               onClick={() => {
-                updateVariant((v) => M.updateVectorTrace(v, { locked: true }));
-                pushToast("Kroki parsele yerleştirildi.", "basari");
+                // Sadece kilitlemez — krokinin GERÇEK ölçek/konumunu parsel
+                // boyutlarına göre yeniden hesaplar (§ "PARSEL ÇİZİLDİ ≠ KROKİ
+                // PARSELE YERLEŞTİRİLDİ"). "Genişlik/Derinlik" alanları o an ne ise
+                // (useStore'dan taze okunur, cache'lenmez) onlar kullanılır.
+                updateVariant((v) => M.fitVectorTraceToParcel(v, parsel.widthCm, parsel.lengthCm));
+                const after = useStore.getState().currentVariant().vectorTrace;
+                if (after && M.traceOverflowsParcel(after, parsel.widthCm, parsel.lengthCm)) {
+                  pushToast("Kroki parsele yerleştirildi (ölçek/açı nedeniyle sınırlara çok yakın).", "uyari");
+                } else {
+                  pushToast("Kroki parsele yerleştirildi.", "basari");
+                }
               }}
             >
               📍 Parsele Yerleştir
@@ -656,6 +638,104 @@ function ProjectSettingsPanel() {
           >
             Krokiyi Kaldır
           </button>
+
+          {(() => {
+            const rotatedExtent = rotatedBBoxExtent(trace.widthCm * trace.scale, trace.heightCm * trace.scale, trace.rotationDeg);
+            const drawingMinX = trace.x - rotatedExtent.width / 2;
+            const drawingMaxX = trace.x + rotatedExtent.width / 2;
+            const drawingMinY = trace.y - rotatedExtent.height / 2;
+            const drawingMaxY = trace.y + rotatedExtent.height / 2;
+            const row = (label: string, value: string) => (
+              <div key={label} style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>{label}:</span>
+                <span style={{ color: "#38bdf8" }}>{value}</span>
+              </div>
+            );
+            return (
+              <div
+                style={{
+                  marginTop: "12px",
+                  padding: "10px",
+                  background: "#1e293b",
+                  borderRadius: "6px",
+                  fontSize: "10px",
+                  fontFamily: "monospace",
+                  color: "#e2e8f0",
+                  lineHeight: "1.4",
+                  border: "1px solid #334155",
+                }}
+              >
+                <div style={{ fontWeight: "bold", borderBottom: "1px solid #475569", marginBottom: "6px", paddingBottom: "2px", color: "#f8fafc" }}>
+                  📐 Yerleştirme (Transform) Debug
+                </div>
+                {row("Parcel Width/Height", `${Math.round(parsel.widthCm)} / ${Math.round(parsel.lengthCm)} cm`)}
+                {row("Drawing Width/Height", `${Math.round(trace.widthCm)} / ${Math.round(trace.heightCm)} cm (yerel)`)}
+                {row("Scale", trace.scale.toFixed(4))}
+                {row("Rotation", `${Math.round(trace.rotationDeg)}°`)}
+                {row("Translation X/Y", `${Math.round(trace.x)} / ${Math.round(trace.y)} cm`)}
+                {row("Parcel Center", `${Math.round(parsel.widthCm / 2)} / ${Math.round(parsel.lengthCm / 2)} cm`)}
+                {row("Drawing Center", `${Math.round(trace.x)} / ${Math.round(trace.y)} cm`)}
+                {row("Current Drawing Bounds", `X[${Math.round(drawingMinX)}, ${Math.round(drawingMaxX)}] Y[${Math.round(drawingMinY)}, ${Math.round(drawingMaxY)}]`)}
+                {row("Current Parcel Bounds", `X[0, ${Math.round(parsel.widthCm)}] Y[0, ${Math.round(parsel.lengthCm)}]`)}
+                {row("Taşma (Overflow)", M.traceOverflowsParcel(trace, parsel.widthCm, parsel.lengthCm) ? "EVET" : "Hayır")}
+              </div>
+            );
+          })()}
+
+          {trace.debugInfo && (
+            <div style={{
+              marginTop: "12px",
+              padding: "10px",
+              background: "#1e293b",
+              borderRadius: "6px",
+              fontSize: "10px",
+              fontFamily: "monospace",
+              color: "#e2e8f0",
+              lineHeight: "1.4",
+              border: "1px solid #334155"
+            }}>
+              <div style={{ fontWeight: "bold", borderBottom: "1px solid #475569", marginBottom: "6px", paddingBottom: "2px", color: "#f8fafc" }}>
+                🛠️ CAD Hata/Debug Analizi
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Birim (Unit):</span>
+                <span style={{ color: "#38bdf8" }}>{trace.debugInfo.unit}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Toplam Entity:</span>
+                <span>{trace.debugInfo.entityCount}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Outlier Sayısı:</span>
+                <span style={{ color: trace.debugInfo.outlierCount > 0 ? "#f43f5e" : "#34d399" }}>{trace.debugInfo.outlierCount}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Boyut (cm):</span>
+                <span>{trace.debugInfo.widthCm} x {trace.debugInfo.heightCm}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Ham min/max X:</span>
+                <span>{trace.debugInfo.minX} / {trace.debugInfo.maxX}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Ham min/max Y:</span>
+                <span>{trace.debugInfo.minY} / {trace.debugInfo.maxY}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>Birim Katsayısı:</span>
+                <span>{trace.debugInfo.scaleFactor}</span>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <span>En Büyük Entity:</span>
+                <span title={`${trace.debugInfo.largestEntityType} (${trace.debugInfo.largestEntitySize} birim)`}>
+                  {trace.debugInfo.largestEntityType} ({trace.debugInfo.largestEntitySize})
+                </span>
+              </div>
+              <div style={{ marginTop: "4px", borderTop: "1px dashed #475569", paddingTop: "4px", color: "#94a3b8" }}>
+                Dağılım: {trace.debugInfo.typeDistribution}
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
@@ -678,7 +758,8 @@ export default function LeftToolRail() {
   const cursorWorld = useStore((s) => s.cursorWorld);
   const currentPageDrawing = (pages.find((p) => p.id === activePageId) ?? pages[0]).drawing;
 
-  const [activeRailTab, setActiveRailTab] = useState<"sayfalar" | "katmanlar" | "bilesenler" | "olcu" | "notlar" | "raporlar" | "ayarlar">("sayfalar");
+  const activeRailTab = useStore((s) => s.activeRailTab);
+  const setActiveRailTab = useStore((s) => s.setActiveRailTab);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [openModalVisible, setOpenModalVisible] = useState(false);
 
@@ -719,7 +800,7 @@ export default function LeftToolRail() {
 
   return (
     <>
-      <aside className="left-sidebar" style={{ display: "flex", width: "100%", background: "#f8fafc" }}>
+      <aside className="left-sidebar" style={{ display: "flex", width: "100%", background: "var(--bg-sidebar)" }}>
         {/* Far Left Dark Vertical Navigation Rail (Matches Target Screenshot) */}
         <div className="far-left-nav-column">
           <button
@@ -836,7 +917,7 @@ export default function LeftToolRail() {
 
         {/* Main Left Tool Panel Content — sekmeye göre değişir */}
         {leftRailOpen && (
-          <div className="tools-panel" style={{ flex: 1, borderRight: "1px solid #e2e8f0" }}>
+          <div className="tools-panel" style={{ flex: 1, borderRight: "1px solid var(--border-light)" }}>
             {/* Panel Header */}
             <div className="tools-panel-header">
               <h2>
@@ -894,24 +975,16 @@ export default function LeftToolRail() {
             ) : activeRailTab === "raporlar" ? (
               <div className="tools-panel-content">
                 <div className="tool-section-title">Kat Özeti</div>
-                {pages.map((p) => {
-                  const roomCount = Object.keys(p.drawing.rooms).length;
-                  const wallCount = Object.keys(p.drawing.walls).length;
-                  const totalArea = Object.values(p.drawing.rooms).reduce(
-                    (sum, r) => sum + (r.manuelAlanM2 ?? roomAreaM2(r, p.drawing.corners)),
-                    0
-                  );
-                  return (
-                    <div key={p.id} className="page-sidebar-card" style={{ padding: "8px 10px", cursor: "default" }}>
-                      <div>
-                        <div className="page-card-title">{p.name}</div>
-                        <div className="page-card-kot">
-                          {roomCount} oda · {wallCount} duvar · {totalArea.toFixed(1)} m²
-                        </div>
+                {computePageSummaries(pages).map((s) => (
+                  <div key={s.pageId} className="page-sidebar-card" style={{ padding: "8px 10px", cursor: "default" }}>
+                    <div>
+                      <div className="page-card-title">{s.pageName}</div>
+                      <div className="page-card-kot">
+                        {s.roomCount} oda · {s.wallCount} duvar · {s.totalAreaM2.toFixed(1)} m²
                       </div>
                     </div>
-                  );
-                })}
+                  </div>
+                ))}
               </div>
             ) : (
               <div className="tools-panel-content">
@@ -1000,14 +1073,14 @@ export default function LeftToolRail() {
                           <text x="44" y="45" fontSize="10" fontWeight="bold" fill="#ef4444">X</text>
                           <line x1="8" y1="42" x2="8" y2="8" stroke="#22c55e" strokeWidth="2.5" />
                           <text x="5" y="7" fontSize="10" fontWeight="bold" fill="#22c55e">Y</text>
-                          <circle cx="8" cy="42" r="3" fill="#000" />
-                          <text x="12" y="38" fontSize="8" fontWeight="bold" fill="#0f172a">(0,0)</text>
+                          <circle cx="8" cy="42" r="3" fill="#e7e9ef" />
+                          <text x="12" y="38" fontSize="8" fontWeight="bold" fill="#e7e9ef">(0,0)</text>
                         </svg>
                       </div>
 
                       <div className="coord-stats">
                         <div><strong>Origin (0,0):</strong></div>
-                        <div style={{ color: "#64748b" }}>Parselin Sol Alt Köşesi</div>
+                        <div style={{ color: "var(--text-muted)" }}>Parselin Sol Alt Köşesi</div>
                         <div>X: <strong>{cursorX} cm</strong></div>
                         <div>Y: <strong>{cursorY} cm</strong></div>
                         <div>Z: <strong>0.00 cm</strong></div>

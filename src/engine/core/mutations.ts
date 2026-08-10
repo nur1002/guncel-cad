@@ -17,7 +17,15 @@ import {
 } from "../../data/model";
 import type { CatalogSubtype } from "../../data/componentCatalog";
 import { DEFAULT_FLOOR_MATERIAL, DEFAULT_WALL_MATERIAL } from "../../data/materials";
-import { dist, projectPointToSegment, segmentIntersection } from "../drawing/geometry";
+import {
+  dist,
+  projectPointToSegment,
+  segmentIntersection,
+  polygonAreaCm2,
+  polygonCentroid,
+  perpendicular,
+  rotatedBBoxExtent,
+} from "../drawing/geometry";
 
 const SNAP_RADIUS_CM = 20;
 
@@ -903,7 +911,8 @@ export function setVectorTrace(
   variant: FloorVariantData,
   segments: VectorTrace["segments"],
   widthCm: number,
-  heightCm: number
+  heightCm: number,
+  debugInfo?: any
 ): FloorVariantData {
   const trace: VectorTrace = {
     segments,
@@ -916,6 +925,7 @@ export function setVectorTrace(
     opacity: 1,
     visible: true,
     locked: false,
+    debugInfo,
   };
   return { ...variant, vectorTrace: trace };
 }
@@ -928,6 +938,49 @@ export function updateVectorTrace(variant: FloorVariantData, patch: Partial<Vect
 export function removeVectorTrace(variant: FloorVariantData): FloorVariantData {
   if (!variant.vectorTrace) return variant;
   return { ...variant, vectorTrace: null };
+}
+
+/**
+ * "Parsele Yerleştir": krokinin GERÇEK dünya ölçüsünü (scale) ve konumunu, parsel
+ * boyutlarına göre yeniden hesaplar — yalnızca yeşil bir sınır çizmek değil, krokinin
+ * kendisini parsel koordinat sistemine göre dönüştürmek (§ "PARSEL ÇİZİLDİ ≠ KROKİ
+ * PARSELE YERLEŞTİRİLDİ"). Mevcut açıyı (kullanıcı döndürme koluyla veya Açı
+ * girişiyle ayarlamış olabilir) korur; DÖNÜŞ SONRASI eksene-paralel bounding box'ı
+ * (`rotatedBBoxExtent`) baz alarak sığdırır — yoksa 90°'de döndürülmüş bir kroki
+ * parselden taşabilir.
+ *
+ * Ölçek KURALI: gerçek dünya ölçüsü (scale=1) asla büyütülmez — bir bina parseli
+ * "doldurmak" için yapay olarak büyütülmemeli; yalnızca parselden BÜYÜKSE (gerekirse)
+ * oranı koruyarak küçültülür ("gerekirse sığdır"). Bu, mimari açıdan doğru
+ * davranıştır: DWG koordinatları zaten gerçek ölçektedir. Bu fonksiyon yapısı
+ * gereği HİÇBİR ZAMAN taşma üretmez (bkz. `traceOverflowsParcel` — o, kullanıcının
+ * sonradan elle sürükleyip/döndürdüğü DURUMU kontrol etmek içindir).
+ */
+export function fitVectorTraceToParcel(variant: FloorVariantData, parcelWidthCm: number, parcelLengthCm: number): FloorVariantData {
+  if (!variant.vectorTrace) return variant;
+  const trace = variant.vectorTrace;
+
+  const rotatedExtent = rotatedBBoxExtent(trace.widthCm, trace.heightCm, trace.rotationDeg);
+  const fitScale =
+    rotatedExtent.width > 0 && rotatedExtent.height > 0
+      ? Math.min(1, parcelWidthCm / rotatedExtent.width, parcelLengthCm / rotatedExtent.height)
+      : 1;
+
+  return updateVectorTrace(variant, { scale: fitScale, x: parcelWidthCm / 2, y: parcelLengthCm / 2, locked: true });
+}
+
+/**
+ * Krokinin GÜNCEL konum/açı/ölçeğiyle (ör. kullanıcı elle sürükleyip döndürdükten
+ * sonra) parsel sınırlarının dışına taşıp taşmadığını kontrol eder (§15). Taşma
+ * ENGELLENMEZ — kullanıcı isterse yine de taşırabilir, yalnızca uyarı amaçlıdır.
+ */
+export function traceOverflowsParcel(trace: VectorTrace, parcelWidthCm: number, parcelLengthCm: number): boolean {
+  const rotatedExtent = rotatedBBoxExtent(trace.widthCm * trace.scale, trace.heightCm * trace.scale, trace.rotationDeg);
+  const minX = trace.x - rotatedExtent.width / 2;
+  const maxX = trace.x + rotatedExtent.width / 2;
+  const minY = trace.y - rotatedExtent.height / 2;
+  const maxY = trace.y + rotatedExtent.height / 2;
+  return minX < -0.5 || maxX > parcelWidthCm + 0.5 || minY < -0.5 || maxY > parcelLengthCm + 0.5;
 }
 
 export function mirrorSelectedEntities(
@@ -1008,4 +1061,109 @@ export function rotateSelectedEntities(
   }
 
   return { ...variant, corners, components };
+}
+
+export function setWallHeight(variant: FloorVariantData, wallId: ID, height: number): FloorVariantData {
+  const wall = variant.walls[wallId];
+  if (!wall) return variant;
+  return { ...variant, walls: { ...variant.walls, [wallId]: { ...wall, height } } };
+}
+
+export function changeWallLength(variant: FloorVariantData, wallId: ID, newLengthCm: number): FloorVariantData {
+  const wall = variant.walls[wallId];
+  if (!wall) return variant;
+  const a = variant.corners[wall.a];
+  const b = variant.corners[wall.b];
+  if (!a || !b) return variant;
+  const currentLen = dist(a, b);
+  if (currentLen === 0 || newLengthCm <= 0) return variant;
+  const dx = (b.x - a.x) / currentLen;
+  const dy = (b.y - a.y) / currentLen;
+  const newB = { x: a.x + dx * newLengthCm, y: a.y + dy * newLengthCm };
+  return moveCorner(variant, wall.b, newB);
+}
+
+export function adjustRoomArea(
+  variant: FloorVariantData,
+  roomId: ID,
+  targetM2: number,
+  selectedWallId?: ID
+): FloorVariantData {
+  const room = variant.rooms[roomId];
+  if (!room) return variant;
+
+  const cornersList = room.cornerLoop.map((id) => variant.corners[id]).filter(Boolean);
+  if (cornersList.length < 3) return variant;
+
+  const currentAreaCm2 = polygonAreaCm2(cornersList);
+  const targetAreaCm2 = targetM2 * 10000;
+  const deltaAreaCm2 = targetAreaCm2 - currentAreaCm2;
+
+  if (Math.abs(deltaAreaCm2) < 100) {
+    return { ...variant, rooms: { ...variant.rooms, [roomId]: { ...room, manuelAlanM2: targetM2 } } };
+  }
+
+  let bestWallId = selectedWallId;
+  if (!bestWallId) {
+    let bestScore = -1;
+    for (const wId of room.wallLoop) {
+      const wall = variant.walls[wId];
+      if (!wall) continue;
+      const wa = variant.corners[wall.a];
+      const wb = variant.corners[wall.b];
+      if (!wa || !wb) continue;
+      const len = dist(wa, wb);
+      const sharedCount = Object.values(variant.rooms).filter((r) => r.wallLoop.includes(wId)).length;
+      const isShared = sharedCount > 1;
+      const score = (isShared ? 0 : 10000) + len;
+      if (score > bestScore) {
+        bestScore = score;
+        bestWallId = wId;
+      }
+    }
+  }
+
+  if (!bestWallId && room.wallLoop.length > 0) {
+    bestWallId = room.wallLoop[0];
+  }
+
+  const targetWall = bestWallId ? variant.walls[bestWallId] : null;
+  if (!targetWall) return variant;
+
+  const wa = variant.corners[targetWall.a];
+  const wb = variant.corners[targetWall.b];
+  if (!wa || !wb) return variant;
+
+  const centroid = polygonCentroid(cornersList);
+  const midPoint = { x: (wa.x + wb.x) / 2, y: (wa.y + wb.y) / 2 };
+  const norm = perpendicular(wa, wb);
+  const toMid = { x: midPoint.x - centroid.x, y: midPoint.y - centroid.y };
+  const dot = norm.x * toMid.x + norm.y * toMid.y;
+  const dir = dot >= 0 ? norm : { x: -norm.x, y: -norm.y };
+
+  const wallLen = dist(wa, wb);
+  if (wallLen === 0) return variant;
+
+  const shiftDistance = deltaAreaCm2 / wallLen;
+  const shiftVec = { x: dir.x * shiftDistance, y: dir.y * shiftDistance };
+
+  let vv = variant;
+  const newA = { x: wa.x + shiftVec.x, y: wa.y + shiftVec.y };
+  const newB = { x: wb.x + shiftVec.x, y: wb.y + shiftVec.y };
+
+  vv = moveCorner(vv, targetWall.a, newA);
+  vv = moveCorner(vv, targetWall.b, newB);
+
+  vv = {
+    ...vv,
+    rooms: {
+      ...vv.rooms,
+      [roomId]: {
+        ...vv.rooms[roomId],
+        manuelAlanM2: targetM2
+      }
+    }
+  };
+
+  return vv;
 }

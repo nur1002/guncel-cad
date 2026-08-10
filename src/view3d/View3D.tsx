@@ -694,6 +694,8 @@ export default function View3D() {
 }
 
 function wallHeightFor(wallId: string, variant: FloorVariantData, defaultH = 280) {
+  const wall = variant.walls[wallId];
+  if (wall && wall.height !== undefined && wall.height > 50) return wall.height;
   for (const room of Object.values(variant.rooms)) {
     if (room.wallLoop.includes(wallId) && room.height > 50) return room.height;
   }

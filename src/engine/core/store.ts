@@ -113,9 +113,25 @@ interface AppState {
   activeCategoryTabId: string;
   layerVisibility: Record<string, boolean>;
 
+  // 3 aşamalı iş akışı ekranı (Kroki Yükleme / 2B Çizim / Alan Bilgileri).
+  // planMode gibi kalıcı olmayan UI durumu — saveProjectToLocalStorage
+  // payload'ına dahil edilmez.
+  workflowStage: 1 | 2 | 3;
+  setWorkflowStage: (stage: 1 | 2 | 3) => void;
+
   leftRailOpen: boolean;
   toggleLeftRail: () => void;
   setLeftRailOpen: (open: boolean) => void;
+
+  // LeftToolRail'in aktif sekmesi — FAB menüsü (Stage 2) buradan aynı sekmeleri
+  // programatik olarak açabilsin diye store'a taşındı (önceden LeftToolRail'in
+  // kendi yerel state'iydi, FabMenu ile kardeş bileşen olduğu için erişemiyordu).
+  activeRailTab: "sayfalar" | "katmanlar" | "bilesenler" | "olcu" | "notlar" | "raporlar" | "ayarlar";
+  setActiveRailTab: (tab: AppState["activeRailTab"]) => void;
+
+  // Stage 2 araç çubuğu + FAB menüsünün paylaştığı proje modalı durumu.
+  activeModal: "info" | "new" | "open" | "export" | null;
+  setActiveModal: (m: AppState["activeModal"]) => void;
 
   // Arka plan (raster) görseli gerçek dünya ölçeğine oturtmak için: kullanıcı
   // tuvalde bilinen gerçek uzunluğa sahip iki nokta tıklar, gerçek cm değerini
@@ -149,6 +165,7 @@ interface AppState {
   wallRenderMode: "centerline" | "doubleline" | "thick";
   continuousDrawing: boolean;
   orthoEnabled: boolean;
+  areaUpdateMode: boolean;
 
   undoStack: Command[];
   redoStack: Command[];
@@ -218,6 +235,8 @@ interface AppState {
   setWallRenderMode: (mode: "centerline" | "thick") => void;
   toggleContinuousDrawing: () => void;
   toggleOrtho: () => void;
+  toggleAreaUpdateMode: () => void;
+  setAreaUpdateMode: (active: boolean) => void;
 
   addRoomType: (label: string) => string;
   addFloor: () => void;
@@ -388,9 +407,17 @@ export const useStore = create<AppState>((set, get) => ({
   activeCategoryTabId: defaultCategoryTabs[0].id,
   layerVisibility: initialLayerVisibility,
 
+  workflowStage: 1,
+
   leftRailOpen: true,
   toggleLeftRail: () => set((s) => ({ leftRailOpen: !s.leftRailOpen })),
   setLeftRailOpen: (open) => set({ leftRailOpen: open }),
+
+  activeRailTab: "sayfalar",
+  setActiveRailTab: (tab) => set({ activeRailTab: tab }),
+
+  activeModal: null,
+  setActiveModal: (m) => set({ activeModal: m }),
 
   calibrationMode: false,
   setCalibrationMode: (v) => set({ calibrationMode: v }),
@@ -424,6 +451,7 @@ export const useStore = create<AppState>((set, get) => ({
   wallRenderMode: "centerline",
   continuousDrawing: false,
   orthoEnabled: false,
+  areaUpdateMode: false,
 
   undoStack: [],
   redoStack: [],
@@ -731,6 +759,15 @@ export const useStore = create<AppState>((set, get) => ({
     window.alert("Proje tarayıcıda (localStorage) kaydedildi.");
   },
   setPlanMode: (m) => set({ planMode: m }),
+  setWorkflowStage: (stage) =>
+    set((s) => ({
+      workflowStage: stage,
+      selection: null,
+      multiSelection: [],
+      activeTool: "select",
+      stopDrawRequestId: s.isChainDrawingActive ? s.stopDrawRequestId + 1 : s.stopDrawRequestId,
+      isChainDrawingActive: false,
+    })),
   setActiveCategoryTab: (id) => set({ activeCategoryTabId: id }),
   toggleLayer: (key) =>
     set((s) => ({ layerVisibility: { ...s.layerVisibility, [key]: !s.layerVisibility[key] } })),
@@ -744,6 +781,8 @@ export const useStore = create<AppState>((set, get) => ({
   setWallRenderMode: (mode) => set({ wallRenderMode: mode }),
   toggleContinuousDrawing: () => set((s) => ({ continuousDrawing: !s.continuousDrawing })),
   toggleOrtho: () => set((s) => ({ orthoEnabled: !s.orthoEnabled })),
+  toggleAreaUpdateMode: () => set((s) => ({ areaUpdateMode: !s.areaUpdateMode })),
+  setAreaUpdateMode: (active) => set({ areaUpdateMode: active }),
 
   addRoomType: (label) => {
     const s = get();

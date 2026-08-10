@@ -1,12 +1,11 @@
-import React, { Suspense, lazy, useState, useEffect, useRef, Component } from "react";
+import React, { Suspense, lazy, useEffect, useRef, Component } from "react";
 import type { ReactNode } from "react";
 import { useStore } from "./engine/core/store";
-import TopNav from "./panels/top/TopNav";
-import LeftToolRail from "./panels/left/LeftToolRail";
-import CanvasEditor from "./canvas/CanvasEditor";
-import RightPanel from "./panels/right/RightPanel";
-import BottomBar from "./panels/bottom/BottomBar";
 import Toasts from "./ui/Toasts";
+import StageStepper from "./panels/StageStepper";
+import Stage1Screen from "./panels/stage1/Stage1Screen";
+import Stage2Screen from "./panels/stage2/Stage2Screen";
+import Stage3Screen from "./panels/stage3/Stage3Screen";
 
 const View3D = lazy(() => import("./view3d/View3D"));
 
@@ -67,6 +66,7 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 
 function MainApp() {
   const planMode = useStore((s) => s.planMode);
+  const workflowStage = useStore((s) => s.workflowStage);
 
   const undo = useStore((s) => s.undo);
   const redo = useStore((s) => s.redo);
@@ -84,17 +84,44 @@ function MainApp() {
   const toggleSnapEnabled = useStore((s) => s.toggleSnapEnabled);
   const toggleOrtho = useStore((s) => s.toggleOrtho);
   const toggleContinuousDrawing = useStore((s) => s.toggleContinuousDrawing);
+  const setPendingPlacement = useStore((s) => s.setPendingPlacement);
+  const zoomAtScreenPoint = useStore((s) => s.zoomAtScreenPoint);
 
-  // Resizable Side Panels State
-  const [leftWidth, setLeftWidth] = useState(300);
-  const [rightWidth, setRightWidth] = useState(260);
-  const isDraggingLeft = useRef(false);
-  const isDraggingRight = useRef(false);
+  const mouseScreenRef = useRef<{ x: number; y: number }>({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
 
-  // Sağ panel açılır/kapanır: 2B tuval sıkışık kalmasın diye kullanıcı
-  // istediğinde bu sütunu daraltıp tuvale yer açabilir.
-  const [rightPanelOpen, setRightPanelOpen] = useState(true);
-  const COLLAPSED_STRIP_WIDTH = 28;
+  useEffect(() => {
+    const trackMouse = (e: MouseEvent) => {
+      mouseScreenRef.current = { x: e.clientX, y: e.clientY };
+    };
+    window.addEventListener("mousemove", trackMouse);
+    return () => window.removeEventListener("mousemove", trackMouse);
+  }, []);
+
+  const zoomInAtMouse = () => {
+    const canvas = document.querySelector("canvas");
+    let pt = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    if (canvas) {
+      const rect = canvas.getBoundingClientRect();
+      pt = {
+        x: mouseScreenRef.current.x - rect.left,
+        y: mouseScreenRef.current.y - rect.top,
+      };
+    }
+    zoomAtScreenPoint(pt, 1.15);
+  };
+
+  const zoomOutAtMouse = () => {
+    const canvas = document.querySelector("canvas");
+    let pt = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+    if (canvas) {
+      const rect = canvas.getBoundingClientRect();
+      pt = {
+        x: mouseScreenRef.current.x - rect.left,
+        y: mouseScreenRef.current.y - rect.top,
+      };
+    }
+    zoomAtScreenPoint(pt, 1 / 1.15);
+  };
 
   // Global Keyboard Shortcuts — Profesyonel CAD Kısayolları
   useEffect(() => {
@@ -127,6 +154,12 @@ function MainApp() {
       } else if (isCtrl && key === "s") {
         e.preventDefault();
         saveProjectToLocalStorage();
+      } else if (isCtrl && (key === "+" || key === "=")) {
+        e.preventDefault();
+        zoomInAtMouse();
+      } else if (isCtrl && key === "-") {
+        e.preventDefault();
+        zoomOutAtMouse();
       }
       // Silme
       else if (e.key === "Delete" || e.key === "Backspace") {
@@ -141,7 +174,10 @@ function MainApp() {
         setTool("select");
       }
       // ── CAD Araç Kısayolları (Ctrl olmadan) ──
-      else if (!isCtrl) {
+      // Sadece Stage 2 (2B Çizim) aktifken anlamlı — Stage 1'de de bir CanvasEditor
+      // örneği (parsele hizalama önizlemesi) mevcut, 'w' gibi tuşlar orada yanlışlıkla
+      // duvar aracını silahlandırmasın diye workflowStage'e bağlandı.
+      else if (!isCtrl && useStore.getState().workflowStage === 2) {
         switch (key) {
           case "w": e.preventDefault(); setTool("wall"); break;
           case "q": e.preventDefault(); setTool("select"); break;
@@ -150,8 +186,16 @@ function MainApp() {
           case "p": e.preventDefault(); setTool("polygon"); break;
           case "t": e.preventDefault(); setTool("text"); break;
           case "m": e.preventDefault(); setTool("select"); break;
-          case "1": e.preventDefault(); openCatalogFor("kapi"); break;
-          case "2": e.preventDefault(); openCatalogFor("pencere"); break;
+          case "1":
+            e.preventDefault();
+            setPendingPlacement({ tip: "kapi", subtypeId: "tek_kanat_kapi", overrides: { genislik: 90, yukseklik: 210 } });
+            setTool("place");
+            break;
+          case "2":
+            e.preventDefault();
+            setPendingPlacement({ tip: "pencere", subtypeId: "tek_kanat", overrides: { genislik: 120, yukseklik: 140 } });
+            setTool("place");
+            break;
           case "f": e.preventDefault(); fitToScreen(); break;
           case "g": e.preventDefault(); toggleGridVisible(); break;
           case "s":
@@ -173,91 +217,24 @@ function MainApp() {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [undo, redo, copySelectionToClipboard, pasteClipboard, selectAllInVariant, saveProjectToLocalStorage, deleteSelection, setSelection, setMultiSelection, setTool, openCatalogFor, fitToScreen, toggleGridVisible, toggleSnapEnabled, toggleOrtho, toggleContinuousDrawing]);
-
-  // Handle panel resizing
-  useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      if (isDraggingLeft.current) {
-        const newW = Math.max(220, Math.min(500, e.clientX - 52));
-        setLeftWidth(newW);
-      }
-      if (isDraggingRight.current) {
-        const newW = Math.max(200, Math.min(500, window.innerWidth - e.clientX));
-        setRightWidth(newW);
-      }
-    };
-
-    const handleMouseUp = () => {
-      isDraggingLeft.current = false;
-      isDraggingRight.current = false;
-    };
-
-    window.addEventListener("mousemove", handleMouseMove);
-    window.addEventListener("mouseup", handleMouseUp);
-    return () => {
-      window.removeEventListener("mousemove", handleMouseMove);
-      window.removeEventListener("mouseup", handleMouseUp);
-    };
-  }, []);
+  }, [undo, redo, copySelectionToClipboard, pasteClipboard, selectAllInVariant, saveProjectToLocalStorage, deleteSelection, setSelection, setMultiSelection, setTool, openCatalogFor, fitToScreen, toggleGridVisible, toggleSnapEnabled, toggleOrtho, toggleContinuousDrawing, setPendingPlacement, zoomAtScreenPoint]);
 
   return (
     <div className="app">
-      <TopNav />
-      {planMode === "3d" ? (
+      <StageStepper />
+      {workflowStage === 1 ? (
+        <Stage1Screen />
+      ) : workflowStage === 3 ? (
+        <Stage3Screen />
+      ) : planMode === "3d" ? (
+        // Artık hiçbir UI bu dalı tetiklemiyor (2B/3B pill kaldırıldı) — View3D.tsx
+        // ve veri akışı korunuyor, ileride gerçek bir 3B giriş noktası eklenmek
+        // istendiğinde burası tek satırlık bir değişiklikle geri açılabilir.
         <Suspense fallback={<div className="placeholder-section">3B görünüm portalı yükleniyor…</div>}>
           <View3D />
         </Suspense>
       ) : (
-        <>
-          <div className="workspace">
-            {/* Left Panel: SAYFALAR & REFERANS KOORDİNAT */}
-            <div style={{ width: `${leftWidth + 52}px`, display: "flex", flexShrink: 0, position: "relative" }}>
-              <LeftToolRail />
-              <div
-                className="panel-resizer-handle"
-                style={{ right: 0 }}
-                onMouseDown={() => (isDraggingLeft.current = true)}
-                title="Paneli Genişletmek İçin Sürükleyin"
-              />
-            </div>
-
-            {/* Center Canvas Area with Rulers & Page Tabs */}
-            <div className="canvas-area">
-              <CanvasEditor />
-            </div>
-
-            {/* Middle-Right Panel: ÖZELLİKLER & GÖRÜNÜM AYARLARI & HIZLI ARAÇLAR — açılır/kapanır + genişliği ayarlanabilir */}
-            {rightPanelOpen ? (
-              <div style={{ width: `${rightWidth}px`, display: "flex", flexShrink: 0, position: "relative" }}>
-                <div
-                  className="panel-resizer-handle"
-                  style={{ left: 0 }}
-                  onMouseDown={() => (isDraggingRight.current = true)}
-                  title="Paneli Genişletmek İçin Sürükleyin"
-                />
-                <button
-                  className="panel-collapse-btn panel-collapse-btn--right"
-                  onClick={() => setRightPanelOpen(false)}
-                  title="Paneli Daralt"
-                >
-                  ›
-                </button>
-                <RightPanel />
-              </div>
-            ) : (
-              <button
-                className="panel-collapsed-strip"
-                style={{ width: `${COLLAPSED_STRIP_WIDTH}px` }}
-                onClick={() => setRightPanelOpen(true)}
-                title="Özellikler Panelini Aç"
-              >
-                ‹
-              </button>
-            )}
-          </div>
-          <BottomBar />
-        </>
+        <Stage2Screen />
       )}
       <Toasts />
     </div>

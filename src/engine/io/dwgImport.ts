@@ -109,7 +109,7 @@ async function tryRealDwgConversion(file: File, headerStr: string): Promise<DwgI
 
     return {
       kind: "vector",
-      apply: (variant) => applyTraceSegments(variant, response.segments),
+      apply: (variant) => applyTraceSegments(variant, response.segments, response.debugInfo),
       segmentCount: response.segments.length,
       success: true,
       message:
@@ -304,6 +304,27 @@ function buildFromSegments(segments: { p1: Pt; p2: Pt }[], fileName: string, hea
     scale = 0.1; // muhtemelen milimetre → cm
   }
 
+  const debugInfo = {
+    entityCount: segments.length,
+    candidateCount: segments.length,
+    outlierCount: 0,
+    minX: Math.round(minX),
+    maxX: Math.round(maxX),
+    minY: Math.round(minY),
+    maxY: Math.round(maxY),
+    unit: scale === 100 ? "Metre (m)" : scale === 0.1 ? "Milimetre (mm)" : "Santimetre (cm)",
+    rawWidth: Math.round(spanX),
+    rawHeight: Math.round(spanY),
+    widthCm: Math.round(spanX * scale),
+    heightCm: Math.round(spanY * scale),
+    scaleFactor: scale,
+    largestEntityType: "LINE",
+    largestEntitySize: Math.round(Math.hypot(spanX, spanY)),
+    smallestEntityType: "LINE",
+    smallestEntitySize: 0,
+    typeDistribution: `LINE: ${segments.length}`,
+  };
+
   const traceSegments: TraceSegment[] = segments.map((s) => ({
     a: { x: Math.round((s.p1.x - minX) * scale), y: Math.round((s.p1.y - minY) * scale) },
     b: { x: Math.round((s.p2.x - minX) * scale), y: Math.round((s.p2.y - minY) * scale) },
@@ -311,7 +332,7 @@ function buildFromSegments(segments: { p1: Pt; p2: Pt }[], fileName: string, hea
 
   return {
     kind: "vector",
-    apply: (variant) => applyTraceSegments(variant, traceSegments),
+    apply: (variant) => applyTraceSegments(variant, traceSegments, debugInfo),
     segmentCount: traceSegments.length,
     success: traceSegments.length > 0,
     message:

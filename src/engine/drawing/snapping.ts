@@ -4,7 +4,7 @@
 // çağırır.
 
 import type { FloorVariantData } from "../../data/model";
-import { dist, type Pt } from "./geometry";
+import { applyTransform, dist, type Pt } from "./geometry";
 
 export type SnapKind = "corner" | "midpoint" | "intersection" | "grid" | "guide" | "angle";
 
@@ -42,18 +42,13 @@ const ANGLE_THRESHOLD_DEG = 5;
 
 /**
  * İçe aktarılan DWG/DXF krokisinin yerel (x,y) noktasını, krokinin yerleştirme
- * dönüşümüyle (konum+açı+ölçek) dünya koordinatına çevirir. `render2d.ts`'teki
- * `drawVectorTrace`'in canvas transform sırasıyla (scale→rotate→translate) BİREBİR
- * aynı olmalı, yoksa ekranda görünen çizgiyle snap noktası uyuşmaz.
+ * dönüşümüyle (konum+açı+ölçek) dünya koordinatına çevirir. `geometry.ts`'teki
+ * paylaşılan `applyTransform` kullanılır — render (`drawVectorTrace`) ve döndürme
+ * kolu hit-test'i (CanvasEditor) de AYNI fonksiyonu kullanır, aralarında sapma
+ * (daha önce yaşanan bir işaret hatası gibi) yapısal olarak imkansız hale gelir.
  */
 function traceLocalToWorld(trace: NonNullable<FloorVariantData["vectorTrace"]>, lx: number, ly: number): Pt {
-  const rad = (trace.rotationDeg * Math.PI) / 180;
-  const sx = lx * trace.scale;
-  const sy = ly * trace.scale;
-  return {
-    x: trace.x + sx * Math.cos(rad) - sy * Math.sin(rad),
-    y: trace.y + sx * Math.sin(rad) + sy * Math.cos(rad),
-  };
+  return applyTransform({ x: lx, y: ly }, trace);
 }
 
 /**
