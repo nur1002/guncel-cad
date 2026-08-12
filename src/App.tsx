@@ -3,10 +3,14 @@ import type { ReactNode } from "react";
 import { useStore } from "./engine/core/store";
 import TopNav from "./panels/top/TopNav";
 import LeftToolRail from "./panels/left/LeftToolRail";
+import LeftNavRail from "./panels/left/LeftNavRail";
+import PageTabsBar from "./panels/top/PageTabsBar";
 import CanvasEditor from "./canvas/CanvasEditor";
 import RightPanel from "./panels/right/RightPanel";
 import BottomBar from "./panels/bottom/BottomBar";
+import ToolDock from "./panels/bottom/ToolDock";
 import Toasts from "./ui/Toasts";
+import KrokiWizardScreen from "./panels/stage1/KrokiWizardScreen";
 
 const View3D = lazy(() => import("./view3d/View3D"));
 
@@ -67,6 +71,7 @@ class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
 
 function MainApp() {
   const planMode = useStore((s) => s.planMode);
+  const workflowStage = useStore((s) => s.workflowStage);
 
   const undo = useStore((s) => s.undo);
   const redo = useStore((s) => s.redo);
@@ -84,16 +89,17 @@ function MainApp() {
   const toggleSnapEnabled = useStore((s) => s.toggleSnapEnabled);
   const toggleOrtho = useStore((s) => s.toggleOrtho);
   const toggleContinuousDrawing = useStore((s) => s.toggleContinuousDrawing);
+  const rightPanelOpen = useStore((s) => s.rightPanelOpen);
+  const toggleRightPanel = useStore((s) => s.toggleRightPanel);
+  const leftRailOpen = useStore((s) => s.leftRailOpen);
+  const toggleLeftRail = useStore((s) => s.toggleLeftRail);
 
   // Resizable Side Panels State
   const [leftWidth, setLeftWidth] = useState(300);
   const [rightWidth, setRightWidth] = useState(260);
+  const [isDockOpen, setIsDockOpen] = useState(true);
   const isDraggingLeft = useRef(false);
   const isDraggingRight = useRef(false);
-
-  // Sağ panel açılır/kapanır: 2B tuval sıkışık kalmasın diye kullanıcı
-  // istediğinde bu sütunu daraltıp tuvale yer açabilir.
-  const [rightPanelOpen, setRightPanelOpen] = useState(true);
   const COLLAPSED_STRIP_WIDTH = 28;
 
   // Global Keyboard Shortcuts — Profesyonel CAD Kısayolları
@@ -202,29 +208,92 @@ function MainApp() {
   }, []);
 
   return (
-    <div className="app">
+    <div className="app" style={{ display: "flex", flexDirection: "column", height: "100vh", overflow: "hidden" }}>
       <TopNav />
-      {planMode === "3d" ? (
-        <Suspense fallback={<div className="placeholder-section">3B görünüm portalı yükleniyor…</div>}>
-          <View3D />
-        </Suspense>
+      {workflowStage === "kroki" ? (
+        <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+          <LeftNavRail />
+          <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+            <KrokiWizardScreen />
+          </div>
+        </div>
       ) : (
         <>
-          <div className="workspace">
+          <div className="workspace" style={{ display: "flex", flex: 1, overflow: "hidden", position: "relative" }}>
+            {/* Far-Left Dikey Navigation Rail */}
+            <LeftNavRail />
+
             {/* Left Panel: SAYFALAR & REFERANS KOORDİNAT */}
-            <div style={{ width: `${leftWidth + 52}px`, display: "flex", flexShrink: 0, position: "relative" }}>
-              <LeftToolRail />
-              <div
-                className="panel-resizer-handle"
-                style={{ right: 0 }}
-                onMouseDown={() => (isDraggingLeft.current = true)}
-                title="Paneli Genişletmek İçin Sürükleyin"
-              />
-            </div>
+            {leftRailOpen ? (
+              <div style={{ width: `${leftWidth}px`, display: "flex", flexShrink: 0, position: "relative" }}>
+                <LeftToolRail />
+                <div
+                  className="panel-resizer-handle"
+                  style={{ right: 0 }}
+                  onMouseDown={() => (isDraggingLeft.current = true)}
+                  title="Paneli Genişletmek İçin Sürükleyin"
+                />
+                <button
+                  className="panel-collapse-btn panel-collapse-btn--left"
+                  onClick={toggleLeftRail}
+                  style={{
+                    position: "absolute",
+                    right: "-12px",
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    width: "24px",
+                    height: "24px",
+                    borderRadius: "50%",
+                    background: "#ffffff",
+                    border: "1px solid #cbd5e1",
+                    boxShadow: "0 2px 6px rgba(0,0,0,0.1)",
+                    cursor: "pointer",
+                    zIndex: 100,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    fontSize: "12px",
+                    color: "#64748b"
+                  }}
+                  title="Sol Paneli Kapat"
+                >
+                  ‹
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={toggleLeftRail}
+                style={{
+                  width: `${COLLAPSED_STRIP_WIDTH}px`,
+                  background: "#f8fafc",
+                  border: "none",
+                  borderRight: "1px solid #e2e8f0",
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: "12px",
+                  color: "#64748b",
+                  fontWeight: "bold",
+                  height: "100%",
+                  boxSizing: "border-box"
+                }}
+                title="Sol Paneli Aç"
+              >
+                ›
+              </button>
+            )}
 
             {/* Center Canvas Area with Rulers & Page Tabs */}
-            <div className="canvas-area">
-              <CanvasEditor />
+            <div className="canvas-area" style={{ flex: 1, position: "relative", display: "flex", flexDirection: "column", overflow: "hidden" }}>
+              <PageTabsBar />
+              {workflowStage === "3d" || planMode === "3d" ? (
+                <Suspense fallback={<div className="placeholder-section">3B görünüm portalı yükleniyor…</div>}>
+                  <View3D />
+                </Suspense>
+              ) : (
+                <CanvasEditor />
+              )}
             </div>
 
             {/* Middle-Right Panel: ÖZELLİKLER & GÖRÜNÜM AYARLARI & HIZLI ARAÇLAR — açılır/kapanır + genişliği ayarlanabilir */}
@@ -238,7 +307,7 @@ function MainApp() {
                 />
                 <button
                   className="panel-collapse-btn panel-collapse-btn--right"
-                  onClick={() => setRightPanelOpen(false)}
+                  onClick={toggleRightPanel}
                   title="Paneli Daralt"
                 >
                   ›
@@ -249,14 +318,43 @@ function MainApp() {
               <button
                 className="panel-collapsed-strip"
                 style={{ width: `${COLLAPSED_STRIP_WIDTH}px` }}
-                onClick={() => setRightPanelOpen(true)}
+                onClick={toggleRightPanel}
                 title="Özellikler Panelini Aç"
               >
                 ‹
               </button>
             )}
           </div>
+          {isDockOpen && <ToolDock />}
           <BottomBar />
+
+          {/* Big Fixed "+" Toggle Button (Sol Alt Köşede Sabit) */}
+          <button
+            onClick={() => setIsDockOpen(!isDockOpen)}
+            style={{
+              position: "fixed",
+              bottom: "40px",
+              left: "80px",
+              width: "48px",
+              height: "48px",
+              borderRadius: "50%",
+              background: "var(--primary-blue)",
+              color: "#ffffff",
+              border: "none",
+              fontSize: "24px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              cursor: "pointer",
+              boxShadow: "0 4px 12px rgba(37,99,235,0.35)",
+              zIndex: 1000,
+              transition: "transform 0.2s ease",
+              transform: isDockOpen ? "rotate(45deg)" : "rotate(0deg)",
+            }}
+            title={isDockOpen ? "Çizim Araçları Paletini Kapat" : "Çizim Araçları Paletini Aç"}
+          >
+            +
+          </button>
         </>
       )}
       <Toasts />

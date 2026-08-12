@@ -23,6 +23,7 @@ export interface Wall extends Traceable {
   b: ID; // Corner id
   thickness: number; // cm
   malzeme: string; // materials.ts / wallMaterials içindeki id
+  type?: string; // "dis" (Dış Duvar) veya "ic" (İç Duvar)
 }
 
 export interface Room extends Traceable {
@@ -33,21 +34,67 @@ export interface Room extends Traceable {
   name: string; // kullanıcı tarafından değiştirilebilir etiket
   height: number; // cm, duvar/oda yüksekliği (3B extrusion için)
   zeminMalzemesi: string; // materials.ts / floorMaterials içindeki id
-  bagimsizBolumId?: ID; // bu oda bir Bağımsız Bölüme aitse (§4.4)
+  bagimsizBolumId?: ID; // bu oda bir Bağımsız Bölüme aitse (§4.4) — TKGM'nin
+  // "Kısım → independentSectionObjectReference" ilişkisinin karşılığı: TKGM Kısım'ı
+  // ayrı bir nesne olarak değil doğrudan bldg:Room ile modelliyor (bkz. TKGM veri
+  // modeli analizi, 2026-08-11), yani bu Room zaten TKGM'nin "Kısım"ı — ayrı bir
+  // Part tipine gerek yok.
   manuelAlanM2?: number; // "Alan Yaz" ile elle girilen alan; poligondan hesabı geçersiz kılar
+  // Opsiyonel: localStorage'a kaydedilmiş eski projelerde bu alan yok — okurken
+  // her zaman `visible !== false` şeklinde kontrol edilmeli (tanımsız = görünür).
+  visible?: boolean;
+  locked?: boolean;
+  // Odanın ait olduğu Page'in `drawing.id`si (bkz. FloorVariantData.id) — Page.id
+  // DEĞİL: mutasyonlar sadece FloorVariantData alır, Page'i bilmez, ama her Page'in
+  // `drawing.id`si o Page için kararlı ve 1:1'dir (bkz. cloneVariant/emptyVariant).
+  // Bir Room'un Page'ini bulmak için: pages.find(p => p.drawing.id === room.floorId).
+  floorId?: ID;
 }
 
 /**
  * Bağımsız Bölüm (§4.4): tapuda ayrı birim oluşturan daire/dükkan.
  * Bir BB birden çok odayı gruplar; toplam alanı odalarından hesaplanır.
+ *
+ * TKGM'nin 3B bina kılavuzunda (cbs.tkgm.gov.tr/3d) Bağımsız Bölüm bir
+ * `gen:GenericCityObject` olarak (bldg:BuildingUnit DEĞİL) modelleniyor; `kod` alanı
+ * TKGM'nin `independentSectionNumber` özniteliğinin karşılığıdır — ayrı bir alan
+ * açılmadı. Dubleks/çok katlı bağımsız bölümler TEK bir nesne ile değil, HER KAT
+ * KENDİ BB kaydını tutarak ve aralarını aynı `kod` değerini paylaşarak temsil edilir
+ * (TKGM: "her bir kata denk gelen kısım için ayrı bir bağımsız bölüm çizilmeli").
  */
 export interface BagimsizBolum {
   id: ID;
-  kod: string; // örn. "-1_-1_1"
-  kat: string; // örn. "ZEMİN"
-  tip: "MSKN" | "TIC"; // Mesken / Ticari
+  kod: string; // örn. "-1_-1_1" — TKGM independentSectionNumber
+  kat: string; // örn. "ZEMİN" — sadece görüntü metni, bkz. floorId
+  tip: "MSKN" | "TIC"; // Mesken / Ticari — TKGM independentSectionUsage
   odaIds: ID[];
   projeNotu?: string;
+  // Bu BB'nin ait olduğu Page'in `drawing.id`si — bkz. Room.floorId açıklaması.
+  floorId?: ID;
+  // Aşağıdakiler TKGM'nin GenericCityObject için zorunlu tuttuğu öznitelikler
+  // (independentSectionPlanNetArea, independentSectionPlanGrossArea,
+  // independentSectionCardinalDirection, takbisPropertyIdentityNumber, additionalNote).
+  // Şimdilik sadece tip-seviyesinde yer tutuyorlar — UI'da hiçbir alan yok, hiçbir
+  // mutasyon bunları set etmiyor; ileride export/entegrasyon çalışmasında doldurulacak.
+  takbisPropertyIdentityNumber?: string;
+  planNetAreaM2?: number;
+  planGrossAreaM2?: number;
+  cardinalDirection?: string;
+  additionalNote?: string;
+}
+
+/**
+ * Proje/bina kimliği (§ TKGM veri modeli analizi). Uygulama tek-bina varsayımıyla
+ * çalışıyor — çoklu bina/blok desteği yok, bu yüzden store'da tekil bir `building`
+ * nesnesi olarak tutuluyor (bkz. store.ts). CityGML çıktısının kök `bldg:Building`
+ * elemanına karşılık gelir.
+ */
+export interface Building {
+  id: ID;
+  name: string;
+  ada?: string;
+  parsel?: string;
+  adres?: string;
 }
 
 export type ComponentAttributeValue = string | number | boolean;
@@ -108,7 +155,7 @@ export interface BackgroundImage {
  * Yerleştir" ile `locked=true` olur ve dönüşüm projeye (undo/redo'ya) kaydedilmiş olur.
  */
 export interface VectorTrace {
-  segments: { a: { x: number; y: number }; b: { x: number; y: number } }[];
+  segments: { a: { x: number; y: number }; b: { x: number; y: number }; type?: string }[];
   widthCm: number; // yerel bbox genişliği (rotasyon/ölçek uygulanmadan önce)
   heightCm: number;
   x: number; // bbox merkezinin dünya konumu
@@ -118,6 +165,7 @@ export interface VectorTrace {
   opacity: number;
   visible: boolean;
   locked: boolean;
+  debugInfo?: any;
 }
 
 export interface ParselInfo {
@@ -139,6 +187,19 @@ export interface FloorVariantData {
   backgroundImage: BackgroundImage | null;
   vectorTrace: VectorTrace | null;
   bagimsizBolumler: Record<ID, BagimsizBolum>;
+  buildingOutline: BuildingOutline | null;
+}
+
+/**
+ * Bina Dış Sınırı (§ Wall/Room/BuildingOutline semantik ayrımı, 2026-08-11): binanın
+ * dış kabuğunun mantıksal gösterimi. **Room DEĞİLDİR** — "Bina Dış Sınırı" aracı yeni
+ * bir Wall veya Room üretmez, sadece kapalı bir köşe döngüsü saklar; salt-görsel bir
+ * dış hat çizgisidir (render2d.ts: drawBuildingOutline). CityGML/3B'ye ayrıca
+ * bağlanması bu turun kapsamı dışında (yalnızca 2B gösterge).
+ */
+export interface BuildingOutline {
+  id: ID;
+  cornerLoop: ID[]; // kapalı döngü — Room.cornerLoop ile aynı biçim
 }
 
 export interface Page {
@@ -152,6 +213,9 @@ export interface Page {
   opacity: number; // Şeffaflık (0.2, 0.4, 0.6, 1.0)
   anchorPoint: { x: number; y: number }; // Referans Noktası (varsayılan: 0,0)
   drawing: FloorVariantData;
+  // Bu kat hangi Building'e ait — tek-bina projelerde store'daki tekil `building.id`
+  // ile aynıdır; alan yine de açıkça tutulur (bkz. Building).
+  buildingId?: ID;
 }
 
 export interface Floor {
@@ -178,6 +242,7 @@ export function emptyVariant(name: string): FloorVariantData {
     backgroundImage: null,
     vectorTrace: null,
     bagimsizBolumler: {},
+    buildingOutline: null,
   };
 }
 
@@ -287,6 +352,10 @@ export function cloneVariant(variant: FloorVariantData, name: string): FloorVari
     textAnnotations[newId] = { ...t, id: newId };
   }
 
+  const buildingOutline: BuildingOutline | null = variant.buildingOutline
+    ? { id: makeId("outline"), cornerLoop: variant.buildingOutline.cornerLoop.map((id) => cornerIdMap.get(id)!).filter(Boolean) }
+    : null;
+
   // Arka plan izleme görseli katlar arasında kopyalanmaz — her kat kendi taranmış
   // planıyla (veya hiç görsel olmadan) başlar.
   return {
@@ -300,5 +369,6 @@ export function cloneVariant(variant: FloorVariantData, name: string): FloorVari
     backgroundImage: null,
     vectorTrace: null,
     bagimsizBolumler,
+    buildingOutline,
   };
 }

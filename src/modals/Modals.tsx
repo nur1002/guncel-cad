@@ -14,10 +14,15 @@ export function ProjectInfoModal({ onClose }: ModalProps) {
   const rooms = useStore((s) => s.currentVariant().rooms);
   const walls = useStore((s) => s.currentVariant().walls);
   const pushToast = useStore((s) => s.pushToast);
+  // Proje adı/ada/parsel artık gerçek store state'ine (s.building) bağlı — önceden
+  // sadece local useState'ti, "Kaydet" bir toast basıp hiçbir yere yazmıyordu
+  // (bkz. TKGM veri modeli analizi, 2026-08-11).
+  const building = useStore((s) => s.building);
+  const setBuildingInfo = useStore((s) => s.setBuildingInfo);
 
-  const [projectName, setProjectName] = useState("Konut Projesi");
-  const [ada, setAda] = useState("124");
-  const [parsel, setParsel] = useState("5");
+  const [projectName, setProjectName] = useState(building.name);
+  const [ada, setAda] = useState(building.ada ?? "124");
+  const [parsel, setParsel] = useState(building.parsel ?? "5");
   const [scale, setScale] = useState("1/100");
   const [unit, setUnit] = useState("cm");
 
@@ -29,6 +34,7 @@ export function ProjectInfoModal({ onClose }: ModalProps) {
   }
 
   const handleSave = () => {
+    setBuildingInfo({ name: projectName, ada, parsel });
     pushToast(`Proje bilgileri güncellendi: ${projectName} (Ada: ${ada}, Parsel: ${parsel})`, "basari");
     onClose();
   };
@@ -299,7 +305,11 @@ export function ExportModal({ onClose }: ModalProps) {
   const variant = useStore((s) => s.currentVariant());
   const roomTypes = useStore((s) => s.roomTypes);
   const floorName = useStore((s) => s.currentFloor().name);
-  const floors = useStore((s) => s.floors);
+  // Gerçek çizim verisinin tek kaynağı `pages` — önceden burada hiç güncellenmeyen
+  // ölü bir `floors` state'i okunuyordu ve export her zaman boş çıkıyordu (bkz.
+  // TKGM veri modeli analizi, 2026-08-11).
+  const pages = useStore((s) => s.pages);
+  const building = useStore((s) => s.building);
 
   const [format, setFormat] = useState("pdf");
 
@@ -310,7 +320,7 @@ export function ExportModal({ onClose }: ModalProps) {
       });
       pushToast("PDF dışa aktarılıyor...", "basari");
     } else if (format === "citygml") {
-      const xml = exportProjectAsCityGml(floors);
+      const xml = exportProjectAsCityGml(pages, building);
       const blob = new Blob([xml], { type: "application/gml+xml" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -321,7 +331,7 @@ export function ExportModal({ onClose }: ModalProps) {
       pushToast("CityGML 3B dosya aktarıldı.", "basari");
     } else {
       // JSON / DXF / DWG / SVG / GeoJSON / IFC fallback
-      const payload = { floors, roomTypes, format };
+      const payload = { pages, building, roomTypes, format };
       const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");

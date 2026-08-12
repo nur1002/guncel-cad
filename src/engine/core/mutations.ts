@@ -17,7 +17,7 @@ import {
 } from "../../data/model";
 import type { CatalogSubtype } from "../../data/componentCatalog";
 import { DEFAULT_FLOOR_MATERIAL, DEFAULT_WALL_MATERIAL } from "../../data/materials";
-import { dist, projectPointToSegment, segmentIntersection } from "../drawing/geometry";
+import { dist, infiniteLineIntersection, offsetSegment, pointInOrOnPolygon, polygonAreaCm2, projectPointToSegment, rotatedBBoxExtent, segmentIntersection } from "../drawing/geometry";
 
 const SNAP_RADIUS_CM = 20;
 
@@ -125,8 +125,29 @@ export function createRoomFromLoop(
     height: defaultHeight,
     zeminMalzemesi: DEFAULT_FLOOR_MATERIAL,
     source: "manuel",
+    visible: true,
+    floorId: variant.id, // bkz. model.ts Room.floorId açıklaması
   };
   return [{ ...variant, rooms: { ...variant.rooms, [id]: room } }, id];
+}
+
+/**
+ * "Bina Dış Sınırı" aracı (§ Wall/Room/BuildingOutline semantik ayrımı, 2026-08-11):
+ * `createRoomFromLoop`'un tam tersi — kapalı bir köşe döngüsü alır ama **ne Wall ne
+ * Room üretir**, sadece `variant.buildingOutline`'ı yazar. Bir kat için en fazla tek
+ * bir dış sınır olur (yeniden çizilirse üzerine yazılır).
+ */
+export function setBuildingOutline(variant: FloorVariantData, cornerIds: ID[]): FloorVariantData {
+  const loop = cornerIds[0] === cornerIds[cornerIds.length - 1] ? cornerIds.slice(0, -1) : cornerIds;
+  if (loop.length < 3) return variant;
+  const id = variant.buildingOutline?.id ?? makeId("outline");
+  return { ...variant, buildingOutline: { id, cornerLoop: loop } };
+}
+
+export function setRoomVisible(variant: FloorVariantData, roomId: ID, visible: boolean): FloorVariantData {
+  const room = variant.rooms[roomId];
+  if (!room) return variant;
+  return { ...variant, rooms: { ...variant.rooms, [roomId]: { ...room, visible } } };
 }
 
 /**
@@ -186,6 +207,44 @@ function sameCornerSet(a: ID[], b: ID[]): boolean {
   return a.every((id) => setB.has(id));
 }
 
+/** Bir odanın gerçekten bölünüp bölünmediğine karar vermek için kaba bir eşik: yeni
+ * odanın alanı eskisinin en az %10'u değilse (ör. büyük bir oda içine çizilen küçük bir
+ * kolon/sütun) eski oda "bölünmüş" sayılmaz, emekliye ayrılmaz — bkz. retireSupersededRooms. */
+const ROOM_SPLIT_MIN_AREA_RATIO = 0.1;
+
+/**
+ * Yeni oluşturulan oda(lar) var olan başka bir odanın TAMAMEN içine düşüyorsa (§ "oda
+ * içinde oda" problemi — kullanıcı önce dış duvarları kapatır, tek büyük bir Room oluşur;
+ * sonra iç bölme duvarlarını çizince eski büyük Room hiç silinmeden yanına küçük Room'lar
+ * eklenirdi), o eski odayı emekliye ayırır (deleteRoom — BB ataması varsa otomatik temizlenir).
+ * Sadece TAM kapsama + anlamlı alan oranı durumunu ele alır (bkz. ROOM_SPLIT_MIN_AREA_RATIO) —
+ * kısmi/eğik kesişimli genel poligon bölme (boolean split) kapsam dışıdır.
+ */
+function retireSupersededRooms(variant: FloorVariantData, newRoomIds: ID[]): FloorVariantData {
+  let vv = variant;
+  for (const newId of newRoomIds) {
+    const newRoom = vv.rooms[newId];
+    if (!newRoom) continue;
+    const newPts = newRoom.cornerLoop.map((id) => vv.corners[id]).filter(Boolean) as { x: number; y: number }[];
+    if (newPts.length < 3) continue;
+    const newAreaCm2 = polygonAreaCm2(newPts);
+
+    for (const oldRoom of Object.values(vv.rooms)) {
+      if (oldRoom.id === newId) continue;
+      const oldPts = oldRoom.cornerLoop.map((id) => vv.corners[id]).filter(Boolean) as { x: number; y: number }[];
+      if (oldPts.length < 3) continue;
+      const oldAreaCm2 = polygonAreaCm2(oldPts);
+      if (oldAreaCm2 <= 0 || newAreaCm2 / oldAreaCm2 < ROOM_SPLIT_MIN_AREA_RATIO) continue;
+
+      const fullyContained = newPts.every((p) => pointInOrOnPolygon(p, oldPts));
+      if (fullyContained) {
+        vv = deleteRoom(vv, oldRoom.id);
+      }
+    }
+  }
+  return vv;
+}
+
 /**
  * Yeni eklenen duvar bir alanı kapattıysa otomatik oda oluşturur.
  * Aynı köşe kümesine sahip bir oda zaten varsa tekrar oluşturmaz.
@@ -201,7 +260,9 @@ export function autoDetectRoomForWall(
   if (!loop) return [variant, null];
   const alreadyExists = Object.values(variant.rooms).some((r) => sameCornerSet(r.cornerLoop, loop));
   if (alreadyExists) return [variant, null];
-  return createRoomFromLoop(variant, loop, typeId, defaultLabel, defaultHeight);
+  const [next, roomId] = createRoomFromLoop(variant, loop, typeId, defaultLabel, defaultHeight);
+  if (!roomId) return [next, null];
+  return [retireSupersededRooms(next, [roomId]), roomId];
 }
 
 export function autoDetectAllRooms(
@@ -223,6 +284,7 @@ export function autoDetectAllRooms(
       }
     }
   }
+  if (createdIds.length > 0) vv = retireSupersededRooms(vv, createdIds);
   return [vv, createdIds];
 }
 
@@ -331,17 +393,27 @@ export function moveCorner(variant: FloorVariantData, cornerId: ID, p: { x: numb
 
 export function deleteWall(variant: FloorVariantData, wallId: ID): FloorVariantData {
   if (!variant.walls[wallId]) return variant;
-  const walls = { ...variant.walls };
-  delete walls[wallId];
-  const rooms = { ...variant.rooms };
-  for (const [rid, room] of Object.entries(rooms)) {
-    if (room.wallLoop.includes(wallId)) delete rooms[rid];
+
+  // Bu duvarı kaybedince silinecek odaları önce bir Bağımsız Bölüme atanmışlarsa
+  // oradan çıkar — aksi halde bagimsizBolumler[...].odaIds artık var olmayan bir
+  // room id'sine referans vermeye devam eder (orphan data, § TKGM veri modeli analizi).
+  let next = variant;
+  const doomedRoomIds = Object.values(next.rooms)
+    .filter((r) => r.wallLoop.includes(wallId))
+    .map((r) => r.id);
+  for (const rid of doomedRoomIds) {
+    next = assignRoomToBagimsizBolum(next, rid, null);
   }
-  const components = { ...variant.components };
+
+  const walls = { ...next.walls };
+  delete walls[wallId];
+  const rooms = { ...next.rooms };
+  for (const rid of doomedRoomIds) delete rooms[rid];
+  const components = { ...next.components };
   for (const [cid, comp] of Object.entries(components)) {
     if (comp.konum.kind === "duvar" && comp.konum.duvarId === wallId) delete components[cid];
   }
-  return { ...variant, walls, rooms, components };
+  return { ...next, walls, rooms, components };
 }
 
 export function deleteCorner(variant: FloorVariantData, cornerId: ID): FloorVariantData {
@@ -354,6 +426,52 @@ export function deleteCorner(variant: FloorVariantData, cornerId: ID): FloorVari
   const corners = { ...next.corners };
   delete corners[cornerId];
   return { ...next, corners };
+}
+
+/**
+ * İki duvarı, aralarındaki ORTAK köşeden birleştirip TEK duvar yapar (Trim/Extend
+ * "Duvar Birleştir" ileri-seviye senaryoları için temel primitif). Duvarlar gerçekten
+ * kolineer değilse (çapraz açı > toleransla) hiçbir şey yapmaz — birleştirme sadece
+ * gerçekten düz bir çizgi oluşturduğunda anlamlıdır. Ortak köşe, üçüncü bir duvara
+ * (T-junction) da bağlıysa SİLİNMEZ — sadece iki duvarın referansı yeni tek duvara
+ * yönlendirilir, köşe veri bütünlüğü bozulmaz.
+ */
+export function joinCollinearWalls(variant: FloorVariantData, wallIdA: ID, wallIdB: ID, toleranceDeg = 3): FloorVariantData {
+  const wa = variant.walls[wallIdA];
+  const wb = variant.walls[wallIdB];
+  if (!wa || !wb || wa.id === wb.id) return variant;
+
+  const shared = [wa.a, wa.b].find((id) => id === wb.a || id === wb.b);
+  if (!shared) return variant; // ortak köşeleri yoksa birleştirilemez
+  const outerA = wa.a === shared ? wa.b : wa.a;
+  const outerB = wb.a === shared ? wb.b : wb.a;
+  if (outerA === outerB) return variant; // aynı iki köşe arasında zaten çakışık
+
+  const pShared = variant.corners[shared];
+  const pOuterA = variant.corners[outerA];
+  const pOuterB = variant.corners[outerB];
+  if (!pShared || !pOuterA || !pOuterB) return variant;
+
+  const angleA = Math.atan2(pShared.y - pOuterA.y, pShared.x - pOuterA.x);
+  const angleB = Math.atan2(pOuterB.y - pShared.y, pOuterB.x - pShared.x);
+  let diff = Math.abs(angleA - angleB);
+  if (diff > Math.PI) diff = 2 * Math.PI - diff;
+  if (diff > (toleranceDeg * Math.PI) / 180) return variant; // kolineer değil
+
+  if (findWallBetween(variant, outerA, outerB)) return variant; // zaten doğrudan bağlılar
+
+  const sharedStillNeeded = Object.values(variant.walls).some(
+    (w) => w.id !== wallIdA && w.id !== wallIdB && (w.a === shared || w.b === shared)
+  );
+
+  let next = deleteWall(variant, wallIdA);
+  next = deleteWall(next, wallIdB);
+  if (!sharedStillNeeded) {
+    const corners = { ...next.corners };
+    delete corners[shared];
+    next = { ...next, corners };
+  }
+  return addWall(next, outerA, outerB, wa.thickness, wa.malzeme);
 }
 
 /**
@@ -417,7 +535,9 @@ export function createPolygonRoom(
   for (let i = 0; i < cornerIds.length; i++) {
     vv = addWall(vv, cornerIds[i], cornerIds[(i + 1) % cornerIds.length], thickness);
   }
-  return createRoomFromLoop(vv, cornerIds, typeId, label, defaultHeight);
+  const [next, roomId] = createRoomFromLoop(vv, cornerIds, typeId, label, defaultHeight);
+  if (!roomId) return [next, null];
+  return [retireSupersededRooms(next, [roomId]), roomId];
 }
 
 /**
@@ -502,9 +622,11 @@ export function setRoomHeight(variant: FloorVariantData, roomId: ID, height: num
 
 export function deleteRoom(variant: FloorVariantData, roomId: ID): FloorVariantData {
   if (!variant.rooms[roomId]) return variant;
-  const rooms = { ...variant.rooms };
+  // Silmeden önce Bağımsız Bölümden çıkar — aksi halde bb.odaIds'te orphan id kalır.
+  const cleaned = assignRoomToBagimsizBolum(variant, roomId, null);
+  const rooms = { ...cleaned.rooms };
   delete rooms[roomId];
-  return { ...variant, rooms };
+  return { ...cleaned, rooms };
 }
 
 export function confirmEntity(
@@ -837,7 +959,7 @@ export function createBagimsizBolum(
 
   const id = makeId("bb");
   const sira = Object.keys(variant.bagimsizBolumler).length + 1;
-  const bb: BagimsizBolum = { id, kod: `${kat}_${sira}`, kat, tip, odaIds: gecerliOdalar };
+  const bb: BagimsizBolum = { id, kod: `${kat}_${sira}`, kat, tip, odaIds: gecerliOdalar, floorId: variant.id };
 
   const rooms = { ...variant.rooms };
   for (const odaId of gecerliOdalar) {
@@ -869,6 +991,59 @@ export function deleteBagimsizBolum(variant: FloorVariantData, bbId: ID): FloorV
       rooms[odaId] = rest as Room;
     }
   }
+  return { ...variant, rooms, bagimsizBolumler };
+}
+
+/**
+ * Henüz odası olmayan boş bir Bağımsız Bölüm oluşturur; odalar sonradan
+ * `assignRoomToBagimsizBolum` ile tek tek atanır (§ "mekanlar içinde odalar" —
+ * BB önce panelden kurulur, sonra odalar içine taşınır).
+ */
+export function createEmptyBagimsizBolum(
+  variant: FloorVariantData,
+  kat: string,
+  tip: "MSKN" | "TIC" = "MSKN"
+): [FloorVariantData, ID] {
+  const id = makeId("bb");
+  const sira = Object.keys(variant.bagimsizBolumler).length + 1;
+  const bb: BagimsizBolum = { id, kod: `${kat}_${sira}`, kat, tip, odaIds: [], floorId: variant.id };
+  return [{ ...variant, bagimsizBolumler: { ...variant.bagimsizBolumler, [id]: bb } }, id];
+}
+
+/**
+ * Tek bir odayı bir Bağımsız Bölüme atar (odanın önceki BB'si varsa oradan otomatik
+ * çıkarılır). `bbId=null` verilirse oda mevcut BB'sinden çıkarılır ve atanmamış kalır.
+ */
+export function assignRoomToBagimsizBolum(variant: FloorVariantData, roomId: ID, bbId: ID | null): FloorVariantData {
+  const room = variant.rooms[roomId];
+  if (!room) return variant;
+  if (bbId && !variant.bagimsizBolumler[bbId]) return variant;
+
+  let bagimsizBolumler = variant.bagimsizBolumler;
+  const prevBbId = room.bagimsizBolumId;
+  if (prevBbId && prevBbId !== bbId && bagimsizBolumler[prevBbId]) {
+    bagimsizBolumler = {
+      ...bagimsizBolumler,
+      [prevBbId]: { ...bagimsizBolumler[prevBbId], odaIds: bagimsizBolumler[prevBbId].odaIds.filter((id) => id !== roomId) },
+    };
+  }
+  if (bbId) {
+    const bb = bagimsizBolumler[bbId];
+    bagimsizBolumler = {
+      ...bagimsizBolumler,
+      [bbId]: { ...bb, odaIds: bb.odaIds.includes(roomId) ? bb.odaIds : [...bb.odaIds, roomId] },
+    };
+  }
+
+  const rooms = { ...variant.rooms };
+  if (bbId) {
+    rooms[roomId] = { ...room, bagimsizBolumId: bbId };
+  } else {
+    const { bagimsizBolumId: _removed, ...rest } = room;
+    void _removed;
+    rooms[roomId] = rest as Room;
+  }
+
   return { ...variant, rooms, bagimsizBolumler };
 }
 
@@ -928,6 +1103,34 @@ export function updateVectorTrace(variant: FloorVariantData, patch: Partial<Vect
 export function removeVectorTrace(variant: FloorVariantData): FloorVariantData {
   if (!variant.vectorTrace) return variant;
   return { ...variant, vectorTrace: null };
+}
+
+/**
+ * "Parsele Yerleştir": krokinin GERÇEK ölçek/konumunu parsel boyutlarına göre
+ * yeniden hesaplar (§ "PARSEL ÇİZİLDİ ≠ KROKİ PARSELE YERLEŞTİRİLDİ"). Kasıtlı
+ * tasarım kararı: kroki asla gerçek dünya ölçeğinden BÜYÜTÜLMEZ — DWG/DXF
+ * koordinatları zaten gerçek boyutu temsil eder; parsel daha büyükse kroki
+ * olduğu gibi ortalanır, küçükse SADECE gerektiği kadar küçültülür (scale ≤ 1).
+ */
+export function fitVectorTraceToParcel(variant: FloorVariantData, parcelWidthCm: number, parcelLengthCm: number): FloorVariantData {
+  if (!variant.vectorTrace) return variant;
+  const trace = variant.vectorTrace;
+  const rotatedExtent = rotatedBBoxExtent(trace.widthCm, trace.heightCm, trace.rotationDeg);
+  const fitScale =
+    rotatedExtent.width > 0 && rotatedExtent.height > 0
+      ? Math.min(1, parcelWidthCm / rotatedExtent.width, parcelLengthCm / rotatedExtent.height)
+      : 1;
+  return updateVectorTrace(variant, { scale: fitScale, x: parcelWidthCm / 2, y: parcelLengthCm / 2, locked: true });
+}
+
+/** Kroki, "Parsele Yerleştir" sonrası parsel sınırlarını taşıyor mu — bilgilendirici uyarı için. */
+export function traceOverflowsParcel(trace: VectorTrace, parcelWidthCm: number, parcelLengthCm: number): boolean {
+  const rotatedExtent = rotatedBBoxExtent(trace.widthCm * trace.scale, trace.heightCm * trace.scale, trace.rotationDeg);
+  const minX = trace.x - rotatedExtent.width / 2;
+  const maxX = trace.x + rotatedExtent.width / 2;
+  const minY = trace.y - rotatedExtent.height / 2;
+  const maxY = trace.y + rotatedExtent.height / 2;
+  return minX < -0.5 || maxX > parcelWidthCm + 0.5 || minY < -0.5 || maxY > parcelLengthCm + 0.5;
 }
 
 export function mirrorSelectedEntities(
@@ -1008,4 +1211,114 @@ export function rotateSelectedEntities(
   }
 
   return { ...variant, corners, components };
+}
+
+/**
+ * Ölçekle aracı: seçili köşeleri ve zemin bileşenlerini pivot noktasına göre
+ * `factor` oranında büyütür/küçültür. `rotateSelectedEntities`'in aynı deseni —
+ * duvarlar sadece köşeleri bağladığı için köşeler pivot'a göre ölçeklenince
+ * duvar uzunlukları da doğal olarak ölçeklenmiş olur.
+ */
+export function scaleSelection(
+  variant: FloorVariantData,
+  cornerIds: ID[],
+  floorCompIds: ID[],
+  factor: number,
+  pivot: { x: number; y: number }
+): FloorVariantData {
+  if (factor <= 0 || !Number.isFinite(factor)) return variant;
+  const scalePoint = (x: number, y: number) => ({
+    x: pivot.x + (x - pivot.x) * factor,
+    y: pivot.y + (y - pivot.y) * factor,
+  });
+
+  const corners = { ...variant.corners };
+  for (const id of cornerIds) {
+    const c = corners[id];
+    if (!c) continue;
+    const p = scalePoint(c.x, c.y);
+    corners[id] = { ...c, x: p.x, y: p.y };
+  }
+
+  const components = { ...variant.components };
+  for (const id of floorCompIds) {
+    const comp = components[id];
+    if (!comp || comp.konum.kind !== "zemin") continue;
+    const p = scalePoint(comp.konum.x, comp.konum.y);
+    components[id] = { ...comp, konum: { ...comp.konum, x: p.x, y: p.y } };
+  }
+
+  return { ...variant, corners, components };
+}
+
+/**
+ * Offset aracı: bir duvarı kendi doğrultusuna dik yönde distanceCm kadar
+ * öteleyip PARALEL YENİ bir duvar oluşturur (orijinal duvar korunur — AutoCAD'in
+ * Offset komutu gibi). Yeni duvarın kalınlığı/malzemesi orijinaliyle aynıdır.
+ */
+export function offsetWall(variant: FloorVariantData, wallId: ID, distanceCm: number): [FloorVariantData, ID | null] {
+  const wall = variant.walls[wallId];
+  if (!wall) return [variant, null];
+  const a = variant.corners[wall.a];
+  const b = variant.corners[wall.b];
+  if (!a || !b) return [variant, null];
+
+  const [na, nb] = offsetSegment(a, b, distanceCm);
+  let next = variant;
+  let idA: ID, idB: ID;
+  [next, idA] = addCorner(next, na);
+  [next, idB] = addCorner(next, nb);
+  next = addWall(next, idA, idB, wall.thickness, wall.malzeme);
+  const newWall = Object.values(next.walls).find((w) => (w.a === idA && w.b === idB) || (w.a === idB && w.b === idA));
+  return [next, newWall?.id ?? null];
+}
+
+/**
+ * Trim/Extend aracı: hedef duvarın, boundaryWall'ın SONSUZ doğrusuna göre
+ * hangi ucu daha yakınsa o ucu tam kesişim noktasına taşır. Matematiksel
+ * olarak tek bir işlem — geometri kesişimin duvar gövdesinin İÇİNDE mi (kısaltma/
+ * trim) yoksa DIŞINDA mı (uzatma/extend) olduğuna göre doğal olarak ayrışır,
+ * bu yüzden trimWallToWall/extendWallToWall aynı çekirdeği paylaşır (aşağıda).
+ * Taşınacak köşe BAŞKA bir duvara da bağlıysa (junction), o köşe DEĞİL —
+ * kesişim noktasında YENİ bir köşe oluşturulup sadece bu duvarın ucu oraya
+ * yönlendirilir (paylaşılan köşe/oda bütünlüğü bozulmasın diye).
+ */
+function retargetWallToBoundary(variant: FloorVariantData, wallId: ID, boundaryWallId: ID): FloorVariantData {
+  const wall = variant.walls[wallId];
+  const boundary = variant.walls[boundaryWallId];
+  if (!wall || !boundary || wall.id === boundary.id) return variant;
+  const a = variant.corners[wall.a];
+  const b = variant.corners[wall.b];
+  const ba = variant.corners[boundary.a];
+  const bb = variant.corners[boundary.b];
+  if (!a || !b || !ba || !bb) return variant;
+
+  const ip = infiniteLineIntersection(a, b, ba, bb);
+  if (!ip) return variant; // paralel — kesişmiyor
+
+  const distA = dist(a, ip);
+  const distB = dist(b, ip);
+  const nearIsA = distA <= distB;
+  const nearCornerId = nearIsA ? wall.a : wall.b;
+
+  const sharedElsewhere = Object.values(variant.walls).some(
+    (w) => w.id !== wall.id && (w.a === nearCornerId || w.b === nearCornerId)
+  );
+
+  if (!sharedElsewhere) {
+    return moveCorner(variant, nearCornerId, ip);
+  }
+
+  // Paylaşılan köşeye dokunma — yeni bir köşe aç, sadece bu duvarın ucunu değiştir.
+  const [withNewCorner, newCornerId] = addCorner(variant, ip);
+  const updatedWall: Wall = nearIsA ? { ...wall, a: newCornerId } : { ...wall, b: newCornerId };
+  return { ...withNewCorner, walls: { ...withNewCorner.walls, [wall.id]: updatedWall } };
+}
+
+export function trimWallToWall(variant: FloorVariantData, wallIdToTrim: ID, boundaryWallId: ID): FloorVariantData {
+  return retargetWallToBoundary(variant, wallIdToTrim, boundaryWallId);
+}
+
+export function extendWallToWall(variant: FloorVariantData, wallIdToExtend: ID, boundaryWallId: ID): FloorVariantData {
+  return retargetWallToBoundary(variant, wallIdToExtend, boundaryWallId);
 }

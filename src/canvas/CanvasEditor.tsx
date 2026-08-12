@@ -4,6 +4,8 @@ import * as M from "../engine/core/mutations";
 import { hitTestComponent, hitTestCorner, hitTestRoom, hitTestWall } from "../engine/drawing/hitTest";
 import {
   drawBackgroundImage,
+  drawBagimsizBolumBoundary,
+  drawBuildingOutline,
   drawVectorTrace,
   drawComponent,
   drawCornerHandle,
@@ -19,18 +21,20 @@ import {
   drawMeasurePreview,
   drawPlacementPreview,
   drawRoom,
+  drawRoomDimensionChain,
   drawSmartGuides,
   drawSnapIndicator,
   drawTextAnnotations,
   drawWall,
   drawGhostWallPreview,
+  roomPolygon,
   screenToWorld,
   wallQuad,
   worldToScreen,
   type View2D,
 } from "../engine/drawing/render2d";
 import type { FloorVariantData, ID } from "../data/model";
-import { dist, pointInRotatedRect, projectPointToSegment, snapToGrid, type Pt } from "../engine/drawing/geometry";
+import { dist, pointInRotatedRect, polygonCentroid, projectPointToSegment, snapToGrid, type Pt } from "../engine/drawing/geometry";
 import { computeSmartGuides, resolveSnapPoint, type GuideLine, type SnapKind } from "../engine/drawing/snapping";
 import { getRoomType, DEFAULT_ROOM_TYPE_ID } from "../data/roomTypes";
 import ContextMenu, { type ContextMenuItem } from "./ContextMenu";
@@ -48,6 +52,7 @@ export default function CanvasEditor() {
   const selection = useStore((s) => s.selection);
   const layerVisibility = useStore((s) => s.layerVisibility);
   const planMode = useStore((s) => s.planMode);
+  const showDimensionChains = useStore((s) => s.showDimensionChains);
   const roomTypes = useStore((s) => s.roomTypes);
   const activeRoomTypeId = useStore((s) => s.activeRoomTypeId);
   const setChainDrawingActive = useStore((s) => s.setChainDrawingActive);
@@ -58,8 +63,6 @@ export default function CanvasEditor() {
   const parsel = useStore((s) => s.parsel);
   const pages = useStore((s) => s.pages);
   const activePageId = useStore((s) => s.activePageId);
-  const setActivePageId = useStore((s) => s.setActivePageId);
-  const createPage = useStore((s) => s.createPage);
   const currentPage = pages.find((p) => p.id === activePageId) || pages[0];
   const variant = currentPage.drawing;
   const otherFloorsMode = useStore((s) => s.otherFloorsMode);
@@ -67,6 +70,7 @@ export default function CanvasEditor() {
   const gridStepCm = useStore((s) => s.gridStepCm);
   const gridSnapEnabled = useStore((s) => s.gridSnapEnabled);
   const snapEnabled = useStore((s) => s.snapEnabled);
+  const orthoEnabled = useStore((s) => s.orthoEnabled);
   const wallRenderMode = useStore((s) => s.wallRenderMode);
   const pushToast = useStore((s) => s.pushToast);
   const calibrationMode = useStore((s) => s.calibrationMode);
@@ -114,11 +118,19 @@ export default function CanvasEditor() {
   // "roomRect" ayrı bir araç olarak eski dikdörtgen-sürükleme modelini korur (kullanıcı seçerse).
   const roomChainPointsRef = useRef<Pt[]>([]);
   const roomChainCursorRef = useRef<Pt | null>(null);
+  // "Bina Dış Sınırı" aracı: oda-zinciri ile AYNI tık-tık-tık UX'i, ama Wall/Room
+  // üretmez — sadece kapalı bir köşe döngüsü kaydeder (§ Wall/Room/BuildingOutline
+  // semantik ayrımı, 2026-08-11). Kendi ref çifti, oda zincirinin state'ini bozmaz.
+  const outlineChainPointsRef = useRef<Pt[]>([]);
+  const outlineChainCursorRef = useRef<Pt | null>(null);
   const polyDragRef = useRef<Pt | null>(null);
   const polyDragEndRef = useRef<Pt | null>(null);
   const marqueeRef = useRef<Pt | null>(null);
   const marqueeEndRef = useRef<Pt | null>(null);
   const calibrationPointRef = useRef<Pt | null>(null);
+  // Trim/Extend: önce "kısaltılacak/uzatılacak" duvar seçilir, sonra "sınır" duvarı
+  // — calibrationPointRef ile aynı iki-tıklamalı desen.
+  const trimSourceWallRef = useRef<string | null>(null);
   // DWG/DXF krokisi (§ "Bounding box → parsel merkezi → sürükle → döndür → Parsele
   // Yerleştir"): konum sürükleme ve döndürme kolu sürüklemesi için ayrı ref'ler.
   const traceDragRef = useRef<{ startWorld: Pt; startX: number; startY: number; before: FloorVariantData } | null>(null);
@@ -262,8 +274,14 @@ export default function CanvasEditor() {
       const isMultiSelected = (type: Selection["type"], id: string) =>
         multiSelection.some((s) => s.type === type && s.id === id);
 
-      drawGrid(ctx, view, { visible: gridVisible, baseStepCm: gridStepCm });
-      drawParselBoundary(ctx, view, parsel);
+      drawGrid(ctx, view, {
+        visible: gridVisible && layerVisibility["kilavuz"] !== false,
+        baseStepCm: gridStepCm,
+        showAxes: layerVisibility["eksenler"] !== false
+      });
+      if (layerVisibility["parsel"] !== false) {
+        drawParselBoundary(ctx, view, parsel);
+      }
 
       // Render reference ghost pages (pages where visible === true and id !== activePageId)
       for (const p of pages) {
@@ -298,15 +316,29 @@ export default function CanvasEditor() {
         }
       }
 
-      if (variant.vectorTrace) {
+      if (variant.vectorTrace && layerVisibility["referans"] !== false) {
         drawVectorTrace(ctx, view, variant.vectorTrace, traceDragRef.current !== null);
       }
 
       if (planMode !== "duvarlar" && layerVisibility["alanlar"] !== false) {
         for (const room of Object.values(variant.rooms)) {
+          if (room.visible === false) continue;
           const roomSelected = (selection?.type === "room" && selection.id === room.id) || isMultiSelected("room", room.id);
-          drawRoom(ctx, view, room, variant.corners, getRoomType(roomTypes, room.typeId), roomSelected);
+          drawRoom(ctx, view, room, variant.corners, getRoomType(roomTypes, room.typeId), roomSelected, layerVisibility["etiketler"] !== false);
+          if (showDimensionChains) drawRoomDimensionChain(ctx, view, room, variant.corners);
         }
+
+        // Bağımsız Bölüm Sınırı: fiziksel Wall/Room DEĞİL, sadece hangi odaların hangi
+        // BB'ye ait olduğunu gösteren ince kesikli bir gösterge (dolgu yok).
+        for (const bb of Object.values(variant.bagimsizBolumler)) {
+          const memberRooms = bb.odaIds.map((id) => variant.rooms[id]).filter((r): r is NonNullable<typeof r> => !!r);
+          if (memberRooms.length === 0) continue;
+          drawBagimsizBolumBoundary(ctx, view, bb, memberRooms, variant.corners);
+        }
+      }
+
+      if (variant.buildingOutline) {
+        drawBuildingOutline(ctx, view, variant.buildingOutline, variant.corners);
       }
 
       if (layerVisibility["bolme_duvarlar"] !== false && layerVisibility["duvar"] !== false) {
@@ -315,7 +347,7 @@ export default function CanvasEditor() {
           const b = variant.corners[wall.b];
           if (!a || !b) continue;
           const wallSelected = (selection?.type === "wall" && selection.id === wall.id) || isMultiSelected("wall", wall.id);
-          drawWall(ctx, view, wall, a, b, wallSelected, hovered?.type === "wall" && hovered.id === wall.id, undefined, undefined, wallRenderMode);
+          drawWall(ctx, view, wall, a, b, wallSelected, hovered?.type === "wall" && hovered.id === wall.id, undefined, undefined, wallRenderMode, Object.values(variant.rooms), roomTypes);
           drawDimension(ctx, view, a, b);
         }
       }
@@ -353,6 +385,12 @@ export default function CanvasEditor() {
       if (activeTool === "room" && roomChainPointsRef.current.length > 0) {
         const activeTypeConfig = roomTypes.find((r) => r.id === activeRoomTypeId);
         drawRoomChainPreview(ctx, view, roomChainPointsRef.current, roomChainCursorRef.current, activeTypeConfig?.color ?? "#3B82F688");
+      }
+
+      if (activeTool === "buildingOutline" && outlineChainPointsRef.current.length > 0) {
+        // Room dolgusu YOK — sadece Wall taslağıyla aynı ince çizgi + nokta desenini
+        // kullanan bir önizleme (§ "Bina Dış Sınırı Room değildir").
+        drawDraftChain(ctx, view, outlineChainPointsRef.current, outlineChainCursorRef.current);
       }
 
       if (activeTool === "polygon" && polyDragRef.current && polyDragEndRef.current) {
@@ -454,9 +492,10 @@ export default function CanvasEditor() {
         gridSnapEnabled,
         gridStepCm,
         anchor,
+        orthoEnabled,
         guideExtentCm: Math.max(view.width, view.height) / view.pxPerCm + 2000,
       }),
-    [variant, view.pxPerCm, view.width, view.height, snapEnabled, gridSnapEnabled, gridStepCm]
+    [variant, view.pxPerCm, view.width, view.height, snapEnabled, gridSnapEnabled, gridStepCm, orthoEnabled]
   );
 
   const findSubtype = useCallback(
@@ -599,6 +638,40 @@ export default function CanvasEditor() {
       return;
     }
 
+    // Offset: bir duvara tıkla, mesafe sor, paralel yeni bir duvar oluştur.
+    if (activeTool === "offset") {
+      const wallId = hitTestWall(variant, worldPt);
+      if (!wallId) return;
+      const input = window.prompt("Offset mesafesi (cm):", "20");
+      const distanceCm = input ? Number(input) : NaN;
+      if (input && Number.isFinite(distanceCm) && distanceCm !== 0) {
+        updateVariant((v) => M.offsetWall(v, wallId, distanceCm)[0]);
+        pushToast(`Duvar ${distanceCm} cm ötelendi.`, "basari");
+      }
+      useStore.getState().setTool("select");
+      return;
+    }
+
+    // Trim/Extend: önce kısaltılacak/uzatılacak duvara tıkla, sonra sınır duvarına.
+    if (activeTool === "trim" || activeTool === "extend") {
+      const wallId = hitTestWall(variant, worldPt);
+      if (!wallId) return;
+      if (!trimSourceWallRef.current) {
+        trimSourceWallRef.current = wallId;
+        pushToast("Şimdi sınır duvarını seçin.", "bilgi");
+        return;
+      }
+      const sourceId = trimSourceWallRef.current;
+      trimSourceWallRef.current = null;
+      if (sourceId === wallId) return;
+      updateVariant((v) =>
+        activeTool === "trim" ? M.trimWallToWall(v, sourceId, wallId) : M.extendWallToWall(v, sourceId, wallId)
+      );
+      pushToast(activeTool === "trim" ? "Duvar kısaltıldı." : "Duvar uzatıldı.", "basari");
+      useStore.getState().setTool("select");
+      return;
+    }
+
     if (activeTool === "wall") {
       // Tık-tık-tık zincir çizimi: fareyi basılı tutmaya gerek yok. İlk tık başlangıç
       // köşesini işaretler; sonraki her tık bir önceki köşeden buraya bir duvar segmenti
@@ -687,6 +760,45 @@ export default function CanvasEditor() {
 
       roomChainPointsRef.current = [...pts, snapped];
       roomChainCursorRef.current = snapped;
+      liveSnapRef.current = nearId ? { point: snapped, kind: "corner" } : { point: snapped, kind: "grid" };
+      setChainDrawingActive(true);
+      return;
+    }
+
+    if (activeTool === "buildingOutline") {
+      // Room aracıyla AYNI tık-tık-tık desen — ama kapanınca `M.setBuildingOutline`
+      // çağrılır: Wall/Room ÜRETİLMEZ, sadece mevcut/yeni köşelerden oluşan kapalı
+      // bir döngü kaydedilir (§ "Bina Dış Sınırı Room değildir").
+      const nearId = M.findNearestCorner(variant, worldPt);
+      const snapped = nearId ? { x: variant.corners[nearId].x, y: variant.corners[nearId].y } : snapToGrid(worldPt);
+      const pts = outlineChainPointsRef.current;
+
+      if (pts.length >= 3 && dist(pts[0], snapped) * view.pxPerCm < 14) {
+        updateVariant((v) => {
+          let vv = v;
+          const cornerIds: ID[] = [];
+          for (const p of pts) {
+            let id = M.findNearestCorner(vv, p);
+            if (!id) {
+              const [next, newId] = M.addCorner(vv, p);
+              vv = next;
+              id = newId;
+            }
+            cornerIds.push(id);
+          }
+          return M.setBuildingOutline(vv, cornerIds);
+        });
+        outlineChainPointsRef.current = [];
+        outlineChainCursorRef.current = null;
+        setChainDrawingActive(false);
+        pushToast("Bina Dış Sınırı oluşturuldu.", "basari");
+        return;
+      }
+
+      if (pts.length > 0 && dist(pts[pts.length - 1], snapped) * view.pxPerCm < 4) return;
+
+      outlineChainPointsRef.current = [...pts, snapped];
+      outlineChainCursorRef.current = snapped;
       liveSnapRef.current = nearId ? { point: snapped, kind: "corner" } : { point: snapped, kind: "grid" };
       setChainDrawingActive(true);
       return;
@@ -894,6 +1006,14 @@ export default function CanvasEditor() {
       return;
     }
 
+    if (outlineChainPointsRef.current.length > 0) {
+      const nearId = M.findNearestCorner(variant, worldPt);
+      const snapped = nearId ? { x: variant.corners[nearId].x, y: variant.corners[nearId].y } : snapToGrid(worldPt);
+      outlineChainCursorRef.current = snapped;
+      liveSnapRef.current = nearId ? { point: snapped, kind: "corner" } : { point: snapped, kind: "grid" };
+      return;
+    }
+
     if (groupDragRef.current) {
       const { cornerStarts, floorCompStarts, startWorld } = groupDragRef.current;
       const dx = worldPt.x - startWorld.x;
@@ -1022,6 +1142,13 @@ export default function CanvasEditor() {
       for (const comp of Object.values(variant.components)) {
         if (comp.konum.kind === "zemin" && inBox(comp.konum)) picked.push({ type: "component", id: comp.id });
       }
+      // Odaları da kement seçimine dahil et (merkez noktası kutunun içindeyse) — "Bağımsız
+      // Bölüm Sınırı" aracı için birden çok odayı canvas'tan seçebilmek gerekiyor.
+      for (const room of Object.values(variant.rooms)) {
+        const pts = roomPolygon(room, variant.corners);
+        if (pts.length < 3) continue;
+        if (inBox(polygonCentroid(pts))) picked.push({ type: "room", id: room.id });
+      }
       setMultiSelection(picked);
       return;
     }
@@ -1138,7 +1265,9 @@ export default function CanvasEditor() {
       const cursorScreen = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       const cursorWorld = screenToWorld(view, cursorScreen);
       const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-      const nextZoom = Math.min(Math.max(view.pxPerCm * factor, 0.05), 15);
+      // CAD benzeri geniş zoom aralığı: kapı/pencere gibi küçük detayları rahatça
+      // çizebilmek için önceki üst sınır (15) çok düşüktü (§ "aşırı yakınlaşamıyorum").
+      const nextZoom = Math.min(Math.max(view.pxPerCm * factor, 0.05), 80);
       setZoom(nextZoom);
       setPan({
         x: cursorScreen.x - cursorWorld.x * nextZoom,
@@ -1159,7 +1288,11 @@ export default function CanvasEditor() {
       roomChainPointsRef.current = [];
       roomChainCursorRef.current = null;
     }
-    if (activeTool !== "wall" && activeTool !== "room") setChainDrawingActive(false);
+    if (activeTool !== "buildingOutline") {
+      outlineChainPointsRef.current = [];
+      outlineChainCursorRef.current = null;
+    }
+    if (activeTool !== "wall" && activeTool !== "room" && activeTool !== "buildingOutline") setChainDrawingActive(false);
   }, [activeTool]);
 
   // 'S' tuşu: App.tsx'teki TEK global handler karar veriyor (isChainDrawingActive
@@ -1178,6 +1311,8 @@ export default function CanvasEditor() {
     wallDragEndRef.current = null;
     roomChainPointsRef.current = [];
     roomChainCursorRef.current = null;
+    outlineChainPointsRef.current = [];
+    outlineChainCursorRef.current = null;
   }, [stopDrawRequestId]);
 
   const onContextMenu = (e: React.MouseEvent) => {
@@ -1231,67 +1366,32 @@ export default function CanvasEditor() {
 
   return (
     <div ref={wrapperRef} className="canvas-wrapper" style={{ width: "100%", height: "100%", position: "relative", display: "flex", flexDirection: "column" }}>
-      {/* Top Page Tab Bar (Matches Target Screenshot) */}
-      <div style={{ height: "32px", background: "#f1f5f9", borderBottom: "1px solid #cbd5e1", display: "flex", alignItems: "center", padding: "0 10px", gap: "4px", flexShrink: 0 }}>
-        {pages.map((p) => (
-          <div
-            key={p.id}
-            onClick={() => setActivePageId(p.id)}
-            style={{
-              padding: "4px 10px",
-              borderRadius: "4px 4px 0 0",
-              background: p.id === activePageId ? "#ffffff" : "#e2e8f0",
-              border: "1px solid #cbd5e1",
-              borderBottom: p.id === activePageId ? "1px solid #ffffff" : "1px solid #cbd5e1",
-              fontSize: "12px",
-              fontWeight: p.id === activePageId ? "700" : "500",
-              color: p.id === activePageId ? "#1e293b" : "#64748b",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              gap: "6px",
-            }}
-          >
-            <span>{p.name}</span>
-            <span style={{ fontSize: "10px", color: "#94a3b8" }}>✕</span>
-          </div>
-        ))}
-        <button
-          onClick={() => {
-            const name = window.prompt("Yeni Sayfa Adı:", `Kat ${pages.length + 1}`);
-            if (name && name.trim()) {
-              const lastKot = pages.length > 0 ? pages[pages.length - 1].kotElevationCm + pages[pages.length - 1].heightCm : 0;
-              const createdId = createPage(name.trim(), "konut", lastKot, 280);
-              setActivePageId(createdId);
-            }
-          }}
-          style={{ background: "#ffffff", border: "1px solid #cbd5e1", borderRadius: "4px", width: "22px", height: "22px", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", fontWeight: "bold", fontSize: "14px", color: "#475569" }}
-          title="Yeni Sayfa Ekle"
-        >
-          +
-        </button>
-      </div>
 
-      {/* Top Horizontal Ruler Scale Bar — gerçek pan/zoom durumuna göre dinamik cm değerleri */}
-      <div style={{ height: "20px", background: "#f8fafc", borderBottom: "1px solid #cbd5e1", position: "relative", fontSize: "10px", color: "#64748b", fontFamily: "var(--font-mono)", flexShrink: 0, overflow: "hidden" }}>
-        {hRulerTicks.map((t) => (
-          <div key={t.val} style={{ position: "absolute", left: `${30 + t.screenX}px`, top: "3px" }}>
-            {t.val}
-          </div>
-        ))}
-        <span style={{ position: "absolute", right: "8px", top: "3px", fontSize: "9px" }}>cm</span>
-      </div>
 
-      {/* Main Canvas Container with Left Vertical Ruler Scale */}
-      <div style={{ flex: 1, position: "relative", display: "flex", overflow: "hidden" }}>
-        {/* Left Vertical Ruler Scale — gerçek pan/zoom durumuna göre dinamik cm değerleri */}
-        <div style={{ width: "30px", background: "#f8fafc", borderRight: "1px solid #cbd5e1", position: "relative", fontSize: "9px", color: "#64748b", fontFamily: "var(--font-mono)", flexShrink: 0, overflow: "hidden" }}>
-          {vRulerTicks.map((t) => (
-            <div key={t.val} style={{ position: "absolute", top: `${t.screenY}px`, left: "2px", whiteSpace: "nowrap", transformOrigin: "left top", transform: "rotate(-90deg)" }}>
+      {/* Cetvel (ruler): teknik/debug görünümü olduğu için varsayılan GİZLİ — RightPanel'in
+          "Görünüm Ayarları" bölümünden açılabilir (§ layerVisibility["ruler"], default false). */}
+      {layerVisibility["ruler"] === true && (
+        <div style={{ height: "20px", background: "#f8fafc", borderBottom: "1px solid #cbd5e1", position: "relative", fontSize: "10px", color: "#64748b", fontFamily: "var(--font-mono)", flexShrink: 0, overflow: "hidden" }}>
+          {hRulerTicks.map((t) => (
+            <div key={t.val} style={{ position: "absolute", left: `${30 + t.screenX}px`, top: "3px" }}>
               {t.val}
             </div>
           ))}
+          <span style={{ position: "absolute", right: "8px", top: "3px", fontSize: "9px" }}>cm</span>
         </div>
+      )}
+
+      {/* Main Canvas Container with Left Vertical Ruler Scale */}
+      <div style={{ flex: 1, position: "relative", display: "flex", overflow: "hidden" }}>
+        {layerVisibility["ruler"] === true && (
+          <div style={{ width: "30px", background: "#f8fafc", borderRight: "1px solid #cbd5e1", position: "relative", fontSize: "9px", color: "#64748b", fontFamily: "var(--font-mono)", flexShrink: 0, overflow: "hidden" }}>
+            {vRulerTicks.map((t) => (
+              <div key={t.val} style={{ position: "absolute", top: `${t.screenY}px`, left: "2px", whiteSpace: "nowrap", transformOrigin: "left top", transform: "rotate(-90deg)" }}>
+                {t.val}
+              </div>
+            ))}
+          </div>
+        )}
 
         <canvas
           ref={canvasRef}
@@ -1301,6 +1401,59 @@ export default function CanvasEditor() {
           onContextMenu={onContextMenu}
           style={{ flex: 1, touchAction: "none", cursor: activeTool === "wall" ? "crosshair" : "default" }}
         />
+
+        {/* Floating Zoom Controls (Matches Target Screenshot) */}
+        <div
+          style={{
+            position: "absolute",
+            bottom: "16px",
+            right: "16px",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            background: "#ffffff",
+            border: "1px solid #cbd5e1",
+            borderRadius: "8px",
+            padding: "6px 12px",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
+            zIndex: 10,
+            userSelect: "none",
+          }}
+        >
+          <span style={{ fontSize: "12px", color: "#64748b" }} title="Zoom Modu">🔍</span>
+          <button
+            onClick={() => {
+              const nextZoom = Math.min(Math.max(view.pxPerCm * 0.85, 0.05), 80);
+              setZoom(nextZoom);
+            }}
+            style={{ background: "#f8fafc", border: "1px solid #cbd5e1", borderRadius: "4px", width: "22px", height: "22px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "bold", fontSize: "12px", color: "#475569" }}
+            title="Uzaklaş"
+          >
+            -
+          </button>
+          <span style={{ fontSize: "11px", fontWeight: "600", minWidth: "32px", textAlign: "center", color: "#334155" }}>
+            {Math.round(view.pxPerCm * 50)}%
+          </span>
+          <button
+            onClick={() => {
+              const nextZoom = Math.min(Math.max(view.pxPerCm * 1.15, 0.05), 80);
+              setZoom(nextZoom);
+            }}
+            style={{ background: "#f8fafc", border: "1px solid #cbd5e1", borderRadius: "4px", width: "22px", height: "22px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: "bold", fontSize: "12px", color: "#475569" }}
+            title="Yakınlaş"
+          >
+            +
+          </button>
+          <button
+            onClick={() => {
+              useStore.getState().fitToScreen();
+            }}
+            style={{ background: "#ffffff", border: "1px solid #cbd5e1", borderRadius: "4px", width: "22px", height: "22px", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", fontSize: "12px", color: "#475569" }}
+            title="Ekrana Sığdır"
+          >
+            ⛶
+          </button>
+        </div>
       </div>
 
       {contextMenu && (

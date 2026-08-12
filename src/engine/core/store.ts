@@ -2,6 +2,8 @@ import { create } from "zustand";
 import {
   createEmptyPage,
   clonePage,
+  makeId,
+  type Building,
   type Corner,
   type Floor,
   type FloorVariantData,
@@ -29,6 +31,7 @@ export type Tool =
   | "wall"
   | "room"
   | "roomRect"
+  | "buildingOutline"
   | "point"
   | "polygon"
   | "rotrect"
@@ -36,7 +39,10 @@ export type Tool =
   | "text"
   | "layers"
   | "paint"
-  | "place";
+  | "place"
+  | "offset"
+  | "trim"
+  | "extend";
 
 export type Selection =
   | { type: "corner"; id: ID }
@@ -89,6 +95,12 @@ interface AppState {
   parsel: ParselInfo;
   setParselInfo: (parsel: Partial<ParselInfo>) => void;
 
+  // Proje/bina kimliği (§ TKGM veri modeli analizi) — tek-bina varsayımıyla tekil bir
+  // nesne; ProjectInfoModal buraya okur/yazar, cityGmlExport'un kök bldg:Building'i
+  // buradan besleniyor.
+  building: Building;
+  setBuildingInfo: (patch: Partial<Omit<Building, "id">>) => void;
+
   pages: Page[];
   activePageId: ID;
   setActivePageId: (id: ID) => void;
@@ -104,11 +116,6 @@ interface AppState {
   reorderPages: (newPages: Page[]) => void;
   reorderPagesAndRestack: (orderedIds: ID[]) => void;
 
-  // Backward compatibility floor references
-  floors: Floor[];
-  currentFloorId: ID;
-  currentVariantId: ID;
-
   planMode: PlanMode;
   activeCategoryTabId: string;
   layerVisibility: Record<string, boolean>;
@@ -116,6 +123,18 @@ interface AppState {
   leftRailOpen: boolean;
   toggleLeftRail: () => void;
   setLeftRailOpen: (open: boolean) => void;
+
+  rightPanelOpen: boolean;
+  toggleRightPanel: () => void;
+
+  // Üst stepper vurgusu — planMode'dan bağımsız, sadece navigasyon işareti.
+  // "3d_gorunum" YOK: 3B görünüm bu turda kasıtlı olarak pasif/"yakında"
+  // bırakıldı (stepper'da 4. madde olarak görünür ama bu union'a dahil değil,
+  // seçilmesi yapısal olarak mümkün değil).
+  workflowStage: "kroki" | "cizim2d" | "3d" | "alan_yapi";
+  setWorkflowStage: (stage: AppState["workflowStage"]) => void;
+  activeRailTab: string;
+  setActiveRailTab: (tab: string) => void;
 
   // Arka plan (raster) görseli gerçek dünya ölçeğine oturtmak için: kullanıcı
   // tuvalde bilinen gerçek uzunluğa sahip iki nokta tıklar, gerçek cm değerini
@@ -143,10 +162,15 @@ interface AppState {
   gridStepCm: number;
   gridSnapEnabled: boolean;
   snapEnabled: boolean;
+
+  // Oda çevresindeki zincirlenmiş ölçü çizgileri — RightPanel'in "Ölçüler"
+  // checkbox'ı buraya bağlanır, canvas gerçekten bu alana göre çizer.
+  showDimensionChains: boolean;
+  toggleDimensionChains: () => void;
   otherFloorsMode: "hidden" | "ghost" | "visible";
 
   // Profesyonel CAD çizim ayarları
-  wallRenderMode: "centerline" | "doubleline" | "thick";
+  wallRenderMode: "centerline" | "doubleline" | "thick" | "hatch";
   continuousDrawing: boolean;
   orthoEnabled: boolean;
 
@@ -192,6 +216,7 @@ interface AppState {
   pasteClipboard: () => void;
   mirrorSelection: (axis: "vertical" | "horizontal") => void;
   rotateSelection: (angleDeg: number) => void;
+  scaleSelectionByFactor: (factor: number) => void;
 
   // Duvar/oda tık-tık-tık zincir çizimi aktif mi? CanvasEditor'daki zincir durumu
   // (yerel ref) burada aynalanır, çünkü App.tsx'teki global 'S' kısayolu (Snap
@@ -215,7 +240,7 @@ interface AppState {
   setGridStepCm: (stepCm: number) => void;
   toggleGridVisible: () => void;
   toggleSnapEnabled: () => void;
-  setWallRenderMode: (mode: "centerline" | "thick") => void;
+  setWallRenderMode: (mode: "centerline" | "doubleline" | "thick" | "hatch") => void;
   toggleContinuousDrawing: () => void;
   toggleOrtho: () => void;
 
@@ -247,6 +272,9 @@ const initialLayerVisibility: Record<string, boolean> = {
   mobilya: true,
   aydinlatma: true,
   kolon: true,
+  // Cetvel/koordinat ruler'ı CAD debug görünümü gibi durduğu için varsayılan
+  // GİZLİ (§ "aşırı teknik görünüm istemiyoruz") — RightPanel'den açılabilir.
+  ruler: false,
 };
 
 export const useStore = create<AppState>((set, get) => ({
@@ -271,6 +299,9 @@ export const useStore = create<AppState>((set, get) => ({
       const areaM2 = Math.round(((merged.widthCm / 100) * (merged.lengthCm / 100)) * 100) / 100;
       return { parsel: { ...merged, areaM2 } };
     }),
+
+  building: { id: makeId("building"), name: "bilCAD Bina" },
+  setBuildingInfo: (patch) => set((s) => ({ building: { ...s.building, ...patch } })),
 
   pages: initialPagesList,
   activePageId: initialPagesList[2].id, // Zemin Kat
@@ -379,11 +410,6 @@ export const useStore = create<AppState>((set, get) => ({
     set({ pages: restacked });
   },
 
-  // Backward compatibility floor references
-  floors: [],
-  currentFloorId: "",
-  currentVariantId: "",
-
   planMode: "2d",
   activeCategoryTabId: defaultCategoryTabs[0].id,
   layerVisibility: initialLayerVisibility,
@@ -391,6 +417,14 @@ export const useStore = create<AppState>((set, get) => ({
   leftRailOpen: true,
   toggleLeftRail: () => set((s) => ({ leftRailOpen: !s.leftRailOpen })),
   setLeftRailOpen: (open) => set({ leftRailOpen: open }),
+
+  rightPanelOpen: true,
+  toggleRightPanel: () => set((s) => ({ rightPanelOpen: !s.rightPanelOpen })),
+
+  workflowStage: "cizim2d",
+  setWorkflowStage: (stage) => set({ workflowStage: stage }),
+  activeRailTab: "home",
+  setActiveRailTab: (tab) => set({ activeRailTab: tab }),
 
   calibrationMode: false,
   setCalibrationMode: (v) => set({ calibrationMode: v }),
@@ -511,7 +545,12 @@ export const useStore = create<AppState>((set, get) => ({
     set({ redoStack: s.redoStack.slice(0, -1), undoStack: [...s.undoStack, cmd] });
   },
 
-  setZoom: (px_per_cm) => set({ px_per_cm: Math.max(0.05, Math.min(20, px_per_cm)) }),
+  // CAD benzeri geniş zoom aralığı (§ "aşırı yakınlaşamıyorum", 2026-08-11) — bu,
+  // gerçek üst sınırı belirleyen TEK yer: CanvasEditor.tsx'teki wheel/buton
+  // handler'ları da kendi (artık gevşetilmiş) üst sınırlarını gönderiyor ama asıl
+  // kırpma burada oluyordu (önceden 20 idi, kapı/pencere gibi küçük detaylar için
+  // yetersizdi).
+  setZoom: (px_per_cm) => set({ px_per_cm: Math.max(0.05, Math.min(80, px_per_cm)) }),
   setPan: (pan) => set({ pan }),
   zoomAtScreenPoint: (center, factor) => {
     const s = get();
@@ -720,13 +759,63 @@ export const useStore = create<AppState>((set, get) => ({
     };
     s.updateVariant((v) => M.rotateSelectedEntities(v, [...cornerIds], [...floorCompIds], angleDeg, pivot));
   },
+  scaleSelectionByFactor: (factor) => {
+    const s = get();
+    const variant = s.currentVariant();
+    const selected: Selection[] = s.multiSelection.length > 0 ? s.multiSelection : s.selection ? [s.selection] : [];
+    if (selected.length === 0) return;
+    const cornerIds = new Set<ID>();
+    const floorCompIds = new Set<ID>();
+    for (const sel of selected) {
+      if (sel.type === "corner") cornerIds.add(sel.id);
+      if (sel.type === "wall") {
+        const w = variant.walls[sel.id];
+        if (w) {
+          cornerIds.add(w.a);
+          cornerIds.add(w.b);
+        }
+      }
+      if (sel.type === "room") {
+        const r = variant.rooms[sel.id];
+        if (r) for (const cid of r.cornerLoop) cornerIds.add(cid);
+      }
+      if (sel.type === "component") {
+        const c = variant.components[sel.id];
+        if (c && c.konum.kind === "zemin") floorCompIds.add(c.id);
+      }
+    }
+    if (cornerIds.size === 0 && floorCompIds.size === 0) return;
+
+    const xs: number[] = [];
+    const ys: number[] = [];
+    for (const id of cornerIds) {
+      const c = variant.corners[id];
+      if (c) {
+        xs.push(c.x);
+        ys.push(c.y);
+      }
+    }
+    for (const id of floorCompIds) {
+      const c = variant.components[id];
+      if (c && c.konum.kind === "zemin") {
+        xs.push(c.konum.x);
+        ys.push(c.konum.y);
+      }
+    }
+    if (xs.length === 0) return;
+    const pivot = {
+      x: (Math.min(...xs) + Math.max(...xs)) / 2,
+      y: (Math.min(...ys) + Math.max(...ys)) / 2,
+    };
+    s.updateVariant((v) => M.scaleSelection(v, [...cornerIds], [...floorCompIds], factor, pivot));
+  },
   isChainDrawingActive: false,
   setChainDrawingActive: (active) => set({ isChainDrawingActive: active }),
   stopDrawRequestId: 0,
   requestStopDraw: () => set((s) => ({ stopDrawRequestId: s.stopDrawRequestId + 1, isChainDrawingActive: false })),
   saveProjectToLocalStorage: () => {
     const s = get();
-    const payload = { pages: s.pages, parsel: s.parsel, roomTypes: s.roomTypes, catalog: s.catalog };
+    const payload = { pages: s.pages, parsel: s.parsel, roomTypes: s.roomTypes, catalog: s.catalog, building: s.building };
     localStorage.setItem("bilcad_project", JSON.stringify(payload));
     window.alert("Proje tarayıcıda (localStorage) kaydedildi.");
   },
@@ -740,6 +829,8 @@ export const useStore = create<AppState>((set, get) => ({
 
   setGridStepCm: (stepCm) => set({ gridStepCm: stepCm }),
   toggleGridVisible: () => set((s) => ({ gridVisible: !s.gridVisible })),
+  showDimensionChains: true,
+  toggleDimensionChains: () => set((s) => ({ showDimensionChains: !s.showDimensionChains })),
   toggleSnapEnabled: () => set((s) => ({ snapEnabled: !s.snapEnabled })),
   setWallRenderMode: (mode) => set({ wallRenderMode: mode }),
   toggleContinuousDrawing: () => set((s) => ({ continuousDrawing: !s.continuousDrawing })),

@@ -248,6 +248,7 @@ export function createSampleProject(): Floor[] {
         projeNotu: "Konut Dairesi",
       },
     },
+    buildingOutline: null,
   };
 
   return [

@@ -216,7 +216,7 @@ export default function Toolbar() {
                 <button className="context-menu-item" onClick={() => exportVariantAsPdf(useStore.getState().currentVariant(), useStore.getState().roomTypes, useStore.getState().currentFloor().name)}>
                   📄 PDF Dışa Aktar
                 </button>
-                <button className="context-menu-item" onClick={() => exportProjectAsCityGml(useStore.getState().floors)}>
+                <button className="context-menu-item" onClick={() => exportProjectAsCityGml(useStore.getState().pages, useStore.getState().building)}>
                   🏙️ CityGML Dışa Aktar
                 </button>
 

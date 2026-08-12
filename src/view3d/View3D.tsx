@@ -46,6 +46,11 @@ export default function View3D() {
   const showCeiling = useStore((s) => s.showCeiling);
   const toggleCeiling = useStore((s) => s.toggleCeiling);
   const setPlanMode = useStore((s) => s.setPlanMode);
+  const setWorkflowStage = useStore((s) => s.setWorkflowStage);
+  const goTo2D = () => {
+    setPlanMode("2d");
+    setWorkflowStage("cizim2d");
+  };
   const wallMaterials = useStore((s) => s.wallMaterials);
   const floorMaterials = useStore((s) => s.floorMaterials);
   const pages = useStore((s) => s.pages);
@@ -61,6 +66,23 @@ export default function View3D() {
   const [cameraMode, setCameraMode] = useState<"orbit" | "walk">("orbit");
   const [ogelerExpanded, setOgelerExpanded] = useState(true);
   const [malzemeExpanded, setMalzemeExpanded] = useState(true);
+  // Gerçek nesne seçimi (raycasting) — "Seçili Eleman" kartı artık statik değil.
+  const [selectedElement, setSelectedElement] = useState<{ pageId: string; roomId: string } | null>(null);
+  const raycasterRef = useRef(new THREE.Raycaster());
+  // Basitleştirilmiş kesit (§ "tam gelişigüzel düzlem yerine tek yatay kesme"):
+  // açıkken belirtilen dünya Y yüksekliğinin ÜSTÜ kesilir (çatı/tavan kaldırılmış gibi).
+  const [sectionCutOn, setSectionCutOn] = useState(false);
+  const [sectionCutHeightCm, setSectionCutHeightCm] = useState(300);
+  const clippingPlaneRef = useRef(new THREE.Plane(new THREE.Vector3(0, -1, 0), 300));
+  // animate() döngüsü store dışı yerel state'i doğrudan okuyamaz (kapanma/closure
+  // sorunu) — bu yüzden en güncel değer bir ref'te aynalanır (fpsMode'un
+  // useStore.getState() ile her frame taze okunması gibi aynı mantık).
+  const sectionCutOnRef = useRef(false);
+  const sectionCutHeightRef = useRef(300);
+  useEffect(() => {
+    sectionCutOnRef.current = sectionCutOn;
+    sectionCutHeightRef.current = sectionCutHeightCm;
+  }, [sectionCutOn, sectionCutHeightCm]);
 
   // Layer check states
   const [layerStates, setLayerStates] = useState({
@@ -134,6 +156,11 @@ export default function View3D() {
         orbit.update();
       }
       updateLabelOverlay();
+
+      const plane = clippingPlaneRef.current;
+      plane.constant = sectionCutHeightRef.current;
+      renderer.clippingPlanes = sectionCutOnRef.current ? [plane] : [];
+
       renderer.render(scene, camera);
     };
     animate();
@@ -152,11 +179,40 @@ export default function View3D() {
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("keyup", onKeyUp);
 
+    // Gerçek nesne seçimi: tıklanan ekran noktasından ışın gönderip hangi
+    // odanın zemin mesh'ine değdiğini bulur (§ "sahte statik kart değil").
+    let downPos: { x: number; y: number } | null = null;
+    const onPointerDownCanvas = (e: PointerEvent) => {
+      downPos = { x: e.clientX, y: e.clientY };
+    };
+    const onPointerUpCanvas = (e: PointerEvent) => {
+      if (!downPos || Math.hypot(e.clientX - downPos.x, e.clientY - downPos.y) > 4) return; // sürükleme/orbit ile karışmasın
+      const buildingGroup = buildingGroupRef.current;
+      if (!buildingGroup) return;
+      const rect = renderer.domElement.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1
+      );
+      raycasterRef.current.setFromCamera(ndc, camera);
+      const hits = raycasterRef.current.intersectObjects(buildingGroup.children, false);
+      const roomHit = hits.find((h) => h.object.userData?.entityType === "room");
+      if (roomHit) {
+        setSelectedElement({ pageId: roomHit.object.userData.pageId, roomId: roomHit.object.userData.roomId });
+      } else {
+        setSelectedElement(null);
+      }
+    };
+    renderer.domElement.addEventListener("pointerdown", onPointerDownCanvas);
+    renderer.domElement.addEventListener("pointerup", onPointerUpCanvas);
+
     return () => {
       cancelAnimationFrame(raf);
       ro.disconnect();
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
+      renderer.domElement.removeEventListener("pointerdown", onPointerDownCanvas);
+      renderer.domElement.removeEventListener("pointerup", onPointerUpCanvas);
       renderer.dispose();
       if (mount.contains(renderer.domElement)) {
         mount.removeChild(renderer.domElement);
@@ -275,7 +331,8 @@ export default function View3D() {
         overlay,
         labelElsRef.current,
         isActive,
-        page.heightCm
+        page.heightCm,
+        page.id
       );
       if (isActive) {
         activeCollision = collisionWalls;
@@ -305,6 +362,28 @@ export default function View3D() {
     orbitRef.current.update();
   };
 
+  // İsimli kamera görünümleri (§ "GÖRÜNÜMLER" sekme şeridi): sabit
+  // pozisyon+hedef setleri — parsel boyutuna göre makul bir mesafeden.
+  const viewSpan = Math.max(parsel.widthCm, parsel.lengthCm, 1000);
+  const CAMERA_PRESETS: Record<string, { pos: [number, number, number]; target: [number, number, number] }> = {
+    "3D İzometrik": { pos: [viewSpan * 0.7, viewSpan * 0.75, viewSpan * 0.7], target: [0, 0, 0] },
+    "3D Perspektif": { pos: [viewSpan * 0.5, viewSpan * 0.35, viewSpan * 0.9], target: [0, 100, 0] },
+    "Üstten": { pos: [0, viewSpan * 1.1, 0.01], target: [0, 0, 0] },
+    "Önden": { pos: [0, viewSpan * 0.25, viewSpan * 0.9], target: [0, 100, 0] },
+    "Arka Görünüm": { pos: [0, viewSpan * 0.25, -viewSpan * 0.9], target: [0, 100, 0] },
+    "Sol Görünüm": { pos: [-viewSpan * 0.9, viewSpan * 0.25, 0], target: [0, 100, 0] },
+    "Sağ Görünüm": { pos: [viewSpan * 0.9, viewSpan * 0.25, 0], target: [0, 100, 0] },
+  };
+  const [activeView, setActiveView] = useState("3D İzometrik");
+  const applyCameraPreset = (name: string) => {
+    const preset = CAMERA_PRESETS[name];
+    if (!preset || !cameraRef.current || !orbitRef.current) return;
+    cameraRef.current.position.set(...preset.pos);
+    orbitRef.current.target.set(...preset.target);
+    orbitRef.current.update();
+    setActiveView(name);
+  };
+
   return (
     <div className="portal3d-container">
       {/* Top 3D Header Bar (Image 1) */}
@@ -319,13 +398,13 @@ export default function View3D() {
 
         {/* Center Nav Tabs */}
         <nav className="portal3d-nav-tabs">
-          <button className="portal3d-nav-tab" onClick={() => setPlanMode("2d")}>
+          <button className="portal3d-nav-tab" onClick={goTo2D}>
             <span>🏠</span> Ana Sayfa
           </button>
           <button className="portal3d-nav-tab">
             <span>🗺️</span> Harita GIS
           </button>
-          <button className="portal3d-nav-tab" onClick={() => setPlanMode("2d")}>
+          <button className="portal3d-nav-tab" onClick={goTo2D}>
             <span>📋</span> Kat Planları
           </button>
           <button className="portal3d-nav-tab portal3d-nav-tab--active">
@@ -360,7 +439,7 @@ export default function View3D() {
       {/* Sub-Header Bar (← Geri, Ada, Parsel, Kat...) */}
       <div className="portal3d-subheader">
         <div className="subheader-left">
-          <button className="btn-back-2d" onClick={() => setPlanMode("2d")}>
+          <button className="btn-back-2d" onClick={goTo2D}>
             ← Geri
           </button>
 
@@ -385,7 +464,7 @@ export default function View3D() {
         <div className="subheader-right">
           <div className="mode-toggle-group">
             <button className="toggle-btn-3d toggle-btn-3d--active">3B Göster</button>
-            <button className="toggle-btn-3d" onClick={() => setPlanMode("2d")}>
+            <button className="toggle-btn-3d" onClick={goTo2D}>
               2D Planı Göster
             </button>
           </div>
@@ -394,6 +473,19 @@ export default function View3D() {
             🔄 Modeli Güncelle
           </button>
         </div>
+      </div>
+
+      {/* GÖRÜNÜMLER: isimli sabit kamera açıları — gerçekten camera.position/target değiştirir */}
+      <div className="pro-pagetabs">
+        {Object.keys(CAMERA_PRESETS).map((name) => (
+          <div
+            key={name}
+            className={`pro-pagetab ${activeView === name ? "pro-pagetab--active" : ""}`}
+            onClick={() => applyCameraPreset(name)}
+          >
+            {name}
+          </div>
+        ))}
       </div>
 
       {/* Main 3D Workspace */}
@@ -417,15 +509,18 @@ export default function View3D() {
                   <span>🏢 Bina (Tümü)</span>
                 </label>
 
+                <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.05em", margin: "8px 0 4px" }}>
+                  Katlar
+                </div>
                 <div className="checkbox-subgroup">
                   {pages.map((p) => (
-                    <label key={p.id} className="checkbox-item">
+                    <label key={p.id} className="checkbox-item" title="Bu katı 3B sahneden gizle/göster (gerçek — mesh'i kaldırır)">
                       <input
                         type="checkbox"
                         checked={p.visible}
                         onChange={() => togglePageVisible(p.id)}
                       />
-                      <span>📄 {p.name}</span>
+                      <span>{p.id === activePageId ? "📍" : "📄"} {p.name}</span>
                     </label>
                   ))}
                 </div>
@@ -563,7 +658,43 @@ export default function View3D() {
             <button className="canvas-tool-btn" title="Merkezle" onClick={resetCamera}>
               🎯
             </button>
+            <button
+              className="canvas-tool-btn"
+              title={sectionCutOn ? "Kesiti Kapat" : "Kesit Al (belirtilen yüksekliğin üstünü keser)"}
+              onClick={() => setSectionCutOn((v) => !v)}
+              style={sectionCutOn ? { background: "#2563eb", color: "#fff" } : undefined}
+            >
+              ✂
+            </button>
           </div>
+          {sectionCutOn && (
+            <div
+              style={{
+                position: "absolute",
+                top: 56,
+                right: 12,
+                background: "rgba(255,255,255,0.95)",
+                border: "1px solid #cbd5e1",
+                borderRadius: 8,
+                padding: "8px 10px",
+                fontSize: 11,
+                color: "#334155",
+                zIndex: 5,
+                minWidth: 160,
+              }}
+            >
+              <div style={{ marginBottom: 4 }}>Kesit Yüksekliği: {sectionCutHeightCm} cm</div>
+              <input
+                type="range"
+                min={0}
+                max={600}
+                step={10}
+                value={sectionCutHeightCm}
+                onChange={(e) => setSectionCutHeightCm(Number(e.target.value))}
+                style={{ width: "100%" }}
+              />
+            </div>
+          )}
 
           {/* Bottom-Left Camera Mode & Mini-map Overlay Card */}
           <div className="camera-mode-card">
@@ -662,29 +793,34 @@ export default function View3D() {
             </div>
           </div>
 
-          {/* Seçili Eleman: Pencere */}
+          {/* Seçili Eleman: gerçek raycasting seçiminden — sahte statik kart değil */}
           <div className="portal3d-info-card">
             <div className="info-card-header">
-              <h4>Seçili Eleman: Pencere</h4>
+              <h4>Seçili Eleman</h4>
             </div>
             <div className="info-card-body">
-              <div className="element-preview-box">
-                <svg viewBox="0 0 100 80" width="100" height="80" fill="none" stroke="#475569" strokeWidth="2">
-                  <rect x="10" y="10" width="80" height="60" fill="#9FC4D8" rx="2" />
-                  <line x1="50" y1="10" x2="50" y2="70" stroke="#334155" strokeWidth="3" />
-                  <rect x="15" y="15" width="30" height="50" fill="#BAE6FD" opacity="0.6" />
-                  <rect x="55" y="15" width="30" height="50" fill="#BAE6FD" opacity="0.6" />
-                </svg>
-              </div>
-              <div className="element-spec-row">
-                <span>Genişlik:</span> <strong>120 cm</strong>
-              </div>
-              <div className="element-spec-row">
-                <span>Yükseklik:</span> <strong>150 cm</strong>
-              </div>
-              <div className="element-spec-row">
-                <span>Malzeme:</span> <strong>Alüminyum + Cam</strong>
-              </div>
+              {(() => {
+                if (!selectedElement) {
+                  return <div className="info-row" style={{ color: "#94a3b8" }}>Bir mekâna tıklayın.</div>;
+                }
+                const selPage = pages.find((p) => p.id === selectedElement.pageId);
+                const room = selPage?.drawing.rooms[selectedElement.roomId];
+                if (!selPage || !room) {
+                  return <div className="info-row" style={{ color: "#94a3b8" }}>Mekân bulunamadı.</div>;
+                }
+                const area = room.manuelAlanM2 ?? roomAreaM2(room, selPage.drawing.corners);
+                const floorMat = getMaterial(floorMaterials, room.zeminMalzemesi);
+                return (
+                  <>
+                    <div className="element-spec-row"><span>Mekân Adı:</span> <strong>{room.name}</strong></div>
+                    <div className="element-spec-row"><span>Alan:</span> <strong>{area.toFixed(2)} m²</strong></div>
+                    <div className="element-spec-row"><span>Kat:</span> <strong>{selPage.name}</strong></div>
+                    <div className="element-spec-row"><span>Kot:</span> <strong>{(selPage.kotElevationCm / 100).toFixed(2)} m</strong></div>
+                    <div className="element-spec-row"><span>Yükseklik:</span> <strong>{room.height} cm</strong></div>
+                    <div className="element-spec-row"><span>Zemin Kaplama:</span> <strong>{floorMat.label}</strong></div>
+                  </>
+                );
+              })()}
             </div>
           </div>
         </aside>
@@ -715,7 +851,8 @@ function buildFloorMeshes(
   overlay: HTMLDivElement | null,
   labelEls: Map<string, HTMLDivElement>,
   showLabels: boolean,
-  pageHeightCm = 280
+  pageHeightCm = 280,
+  pageId = ""
 ): { collisionWalls: CollisionWall[]; heightCm: number } {
   const wallCollision: CollisionWall[] = [];
   for (const wall of Object.values(variant.walls) as Wall[]) {
@@ -895,6 +1032,9 @@ function buildFloorMeshes(
     const floorMat = new THREE.MeshStandardMaterial({ color: new THREE.Color(floorMaterial.color) });
     const floorMesh = new THREE.Mesh(floorGeo, floorMat);
     floorMesh.position.y = baseZ - FLOOR_THICKNESS_CM;
+    // Raycasting seçimi için: gerçek "Seçili Eleman" panelinin hangi odaya
+    // tıklandığını bilmesi gerekiyor (§ "sahte statik kart değil").
+    floorMesh.userData = { entityType: "room", roomId: room.id, pageId };
     group.add(floorMesh);
 
     const slabGeo = new THREE.ExtrudeGeometry(shape, { depth: STRUCTURAL_SLAB_THICKNESS_CM, bevelEnabled: false });

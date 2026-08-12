@@ -7,11 +7,21 @@
 // verisini gerçek 3B koordinatlarla, standart bldg şeması altında, GIS araçlarının
 // (FME, 3DCityDB, QGIS CityGML eklentisi vb.) okuyabileceği geçerli bir XML olarak taşır.
 
-import type { Floor, FloorVariantData, PlacedComponent, Wall } from "../../data/model";
+import type { BagimsizBolum, Building, FloorVariantData, Page, PlacedComponent, Room, Wall } from "../../data/model";
 import { dist } from "../drawing/geometry";
 
 const CM_TO_M = 0.01;
 const DEFAULT_WALL_HEIGHT_M = 2.7;
+
+/**
+ * TKGM'nin 3B bina kılavuzunda (cbs.tkgm.gov.tr/3d/html/gml_id_name_class_atamalari.html)
+ * her nesne türü için sabit bir gml:id öneki tanımlı (Mimari Bina "MB_", Kat "K_",
+ * Bağımsız Bölüm "BB_", duvar yüzeyi "Wall_", çatı "Roof_", taban "Floor_" — hepsi +GUID).
+ * Kendi iç id şemamızı (makeId) GUID yerine kullanıyoruz — gerçek GUID'e taşıma § F.
+ */
+function gmlId(prefix: string, id: string): string {
+  return prefix + id;
+}
 
 function wallHeightFor(wallId: string, variant: FloorVariantData): number {
   for (const room of Object.values(variant.rooms)) {
@@ -85,7 +95,7 @@ function wallSurfaceXml(wall: Wall, variant: FloorVariantData, baseZ: number): s
     .map((c) => wallOpeningXml(c, a, b, baseZ))
     .join("");
 
-  return `<bldg:boundedBy><bldg:WallSurface gml:id="wall_${wall.id}">${ms}${openings}</bldg:WallSurface></bldg:boundedBy>`;
+  return `<bldg:boundedBy><bldg:WallSurface gml:id="${gmlId("Wall_", wall.id)}">${ms}${openings}</bldg:WallSurface></bldg:boundedBy>`;
 }
 
 function roomSurfacesXml(roomId: string, variant: FloorVariantData, baseZ: number): string {
@@ -97,31 +107,83 @@ function roomSurfacesXml(roomId: string, variant: FloorVariantData, baseZ: numbe
   const groundRing: [number, number, number][] = poly.map((p) => [p.x * CM_TO_M, p.y * CM_TO_M, baseZ]);
   const roofRing: [number, number, number][] = [...poly].reverse().map((p) => [p.x * CM_TO_M, p.y * CM_TO_M, baseZ + heightM]);
 
-  const ground = `<bldg:boundedBy><bldg:GroundSurface gml:id="ground_${room.id}">${multiSurface(
+  const ground = `<bldg:boundedBy><bldg:GroundSurface gml:id="${gmlId("Floor_", room.id)}">${multiSurface(
     `ground_${room.id}`,
     polygonMember(`poly_ground_${room.id}`, groundRing)
   )}</bldg:GroundSurface></bldg:boundedBy>`;
-  const roof = `<bldg:boundedBy><bldg:RoofSurface gml:id="roof_${room.id}">${multiSurface(
+  const roof = `<bldg:boundedBy><bldg:RoofSurface gml:id="${gmlId("Roof_", room.id)}">${multiSurface(
     `roof_${room.id}`,
     polygonMember(`poly_roof_${room.id}`, roofRing)
   )}</bldg:RoofSurface></bldg:boundedBy>`;
   return ground + roof;
 }
 
-function buildingPartXml(floor: Floor, baseZ: number): { xml: string; heightM: number } {
-  const variant = floor.variants[0];
+/**
+ * TKGM'de "Kısım" ayrı bir nesne değil, doğrudan bldg:Room'dur (bkz. bagimsiz_bolum_kisim.html)
+ * ve Bağımsız Bölüme bağlantısı `independentSectionObjectReference` stringAttribute'u ile
+ * kurulur. Mevcut zemin/çatı yüzeyleri (roomSurfacesXml) BuildingPart seviyesinde
+ * boundedBy olarak kalmaya devam ediyor (§ dokunulmuyor — geometriyi bozmamak için);
+ * bu fonksiyon SADECE Room'un kimliğini ve varsa BB referansını taşıyan ayrı, küçük bir
+ * bldg:interiorRoom/bldg:Room elemanı üretir. Room'un kendi iç yüzeyleri (InteriorWallSurface/
+ * FloorSurface/CeilSurface, TKGM'nin lod4MultiSurface'ı) bu turda üretilmiyor (§ F).
+ */
+function roomIdentityXml(room: Room): string {
+  const bbRef = room.bagimsizBolumId
+    ? `<gen:stringAttribute name="independentSectionObjectReference"><gen:value>${escapeXml(
+        gmlId("BB_", room.bagimsizBolumId)
+      )}</gen:value></gen:stringAttribute>`
+    : "";
+  return `<bldg:interiorRoom><bldg:Room gml:id="${gmlId("Room_", room.id)}"><gml:name>${escapeXml(
+    room.name
+  )}</gml:name>${bbRef}</bldg:Room></bldg:interiorRoom>`;
+}
+
+/**
+ * Bağımsız Bölüm CityGML'de `bldg:BuildingUnit` DEĞİL, generics şemasından
+ * `gen:GenericCityObject`'tir (bkz. bagimsiz_bolum.html) — Building/BuildingPart'ın
+ * İÇİNE gömülmez, CityModel kökünde Building ile KARDEŞ bir cityObjectMember olarak
+ * durur; Kısım'a (Room) bağlantı stringAttribute referansıyla kurulur (yukarıdaki
+ * roomIdentityXml). Zorunlu TKGM öznitelikleri: independentSectionNumber (=bb.kod),
+ * independentSectionUsage (=bb.tip); geri kalanı (takbis no, plan alanları vb.)
+ * veri modelinde yer ayrılmış ama henüz UI'dan doldurulmuyor (§ F) — varsa yazılır,
+ * yoksa atlanır.
+ */
+function bagimsizBolumXml(bb: BagimsizBolum): string {
+  const attrs: [string, string | number | undefined][] = [
+    ["independentSectionNumber", bb.kod],
+    ["independentSectionUsage", bb.tip],
+    ["takbisPropertyIdentityNumber", bb.takbisPropertyIdentityNumber],
+    ["independentSectionPlanNetArea", bb.planNetAreaM2],
+    ["independentSectionPlanGrossArea", bb.planGrossAreaM2],
+    ["independentSectionCardinalDirection", bb.cardinalDirection],
+    ["additionalNote", bb.additionalNote],
+  ];
+  const stringAttrs = attrs
+    .filter(([, v]) => v !== undefined && v !== "")
+    .map(
+      ([name, v]) =>
+        `<gen:stringAttribute name="${name}"><gen:value>${escapeXml(String(v))}</gen:value></gen:stringAttribute>`
+    )
+    .join("");
+  return `<core:cityObjectMember><gen:GenericCityObject gml:id="${gmlId("BB_", bb.id)}"><gml:name>${escapeXml(
+    bb.kod
+  )} Bağımsız Bölüm</gml:name>${stringAttrs}</gen:GenericCityObject></core:cityObjectMember>`;
+}
+
+function buildingPartXml(page: Page, baseZ: number): { xml: string; heightM: number } {
+  const variant = page.drawing;
   const roomHeights = Object.values(variant.rooms).map((r) => r.height * CM_TO_M);
   const floorHeightM = roomHeights.length > 0 ? Math.max(...roomHeights) : DEFAULT_WALL_HEIGHT_M;
 
   const walls = Object.values(variant.walls)
     .map((w) => wallSurfaceXml(w, variant, baseZ))
     .join("");
-  const rooms = Object.keys(variant.rooms)
-    .map((rid) => roomSurfacesXml(rid, variant, baseZ))
+  const rooms = Object.values(variant.rooms)
+    .map((r) => roomSurfacesXml(r.id, variant, baseZ) + roomIdentityXml(r))
     .join("");
 
-  const xml = `<bldg:consistsOfBuildingPart><bldg:BuildingPart gml:id="part_${floor.id}"><gml:name>${escapeXml(
-    floor.name
+  const xml = `<bldg:consistsOfBuildingPart><bldg:BuildingPart gml:id="${gmlId("K_", page.id)}"><gml:name>${escapeXml(
+    page.name
   )}</gml:name><bldg:function>1000</bldg:function><bldg:measuredHeight uom="m">${floorHeightM.toFixed(
     2
   )}</bldg:measuredHeight>${walls}${rooms}</bldg:BuildingPart></bldg:consistsOfBuildingPart>`;
@@ -133,28 +195,41 @@ function escapeXml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-export function exportProjectAsCityGml(floors: Floor[], projectName = "bilCAD Bina"): string {
+/**
+ * Gerçek çizim verisinden (`pages`, aktif projenin tek doğru kaynağı — bkz. TKGM veri
+ * modeli analizi, 2026-08-11) CityGML üretir. Önceden bu fonksiyon hiç güncellenmeyen
+ * ölü bir `floors` state'inden besleniyordu ve her zaman boş bina üretiyordu; artık
+ * doğrudan `pages`'i alıyor.
+ */
+export function exportProjectAsCityGml(pages: Page[], building: Building): string {
+  const orderedPages = [...pages].sort((a, b) => a.kotElevationCm - b.kotElevationCm);
+
   let baseZ = 0;
   const parts: string[] = [];
-  for (const floor of floors) {
-    const { xml, heightM } = buildingPartXml(floor, baseZ);
+  for (const page of orderedPages) {
+    const { xml, heightM } = buildingPartXml(page, baseZ);
     parts.push(xml);
     baseZ += heightM;
   }
-
   const totalHeight = baseZ;
 
+  const bbMembers = orderedPages
+    .flatMap((page) => Object.values(page.drawing.bagimsizBolumler))
+    .map((bb) => bagimsizBolumXml(bb))
+    .join("\n");
+
   return `<?xml version="1.0" encoding="UTF-8"?>
-<core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0" xmlns:bldg="http://www.opengis.net/citygml/building/2.0" xmlns:gml="http://www.opengis.net/gml" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
-<gml:name>${escapeXml(projectName)}</gml:name>
+<core:CityModel xmlns:core="http://www.opengis.net/citygml/2.0" xmlns:bldg="http://www.opengis.net/citygml/building/2.0" xmlns:gen="http://www.opengis.net/citygml/generics/2.0" xmlns:gml="http://www.opengis.net/gml" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<gml:name>${escapeXml(building.name)}</gml:name>
 <core:cityObjectMember>
-<bldg:Building gml:id="building_1">
-<gml:name>${escapeXml(projectName)}</gml:name>
+<bldg:Building gml:id="${gmlId("MB_", building.id)}">
+<gml:name>${escapeXml(building.name)}</gml:name>
 <bldg:function>1000</bldg:function>
 <bldg:measuredHeight uom="m">${totalHeight.toFixed(2)}</bldg:measuredHeight>
 ${parts.join("\n")}
 </bldg:Building>
 </core:cityObjectMember>
+${bbMembers}
 </core:CityModel>
 `;
 }

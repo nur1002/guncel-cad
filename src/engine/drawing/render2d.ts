@@ -1,10 +1,19 @@
 // Saf 2D canvas çizim fonksiyonları. Hiçbiri state tutmaz; CanvasEditor bu
 // fonksiyonları her frame'de mevcut veriyle çağırır (§4).
 
-import type { Corner, FloorVariantData, PlacedComponent, Room, VectorTrace, Wall } from "../../data/model";
+import type { BagimsizBolum, BuildingOutline, Corner, FloorVariantData, PlacedComponent, Room, VectorTrace, Wall } from "../../data/model";
 import type { RoomTypeConfig } from "../../data/roomTypes";
 import { COLOR_BLUEPRINT, COLOR_GRID, COLOR_INK, COLOR_RUST } from "../../styles/theme";
 import { cm2ToM2, dist, perpendicular, polygonAreaCm2, polygonCentroid, type Pt } from "./geometry";
+
+
+/**
+ * Malzemeye göre 45° taşıma (hatch) deseni — mimari kesit çizimi geleneği.
+ * Pattern nesneleri context'e bağlı olduğu için (ve her frame yeniden üretmek
+ * pahalı olduğu için) malzeme id'sine göre memoize edilir; yalnızca ilk
+ * kullanımda küçük bir offscreen tuvalde çizilir.
+ */
+
 
 export interface View2D {
   pxPerCm: number;
@@ -119,8 +128,8 @@ export function drawParselBoundary(
   const p1 = worldToScreen(view, { x: parsel.widthCm, y: parsel.lengthCm });
 
   ctx.save();
-  ctx.strokeStyle = "#16A34A";
-  ctx.lineWidth = Math.max(2, 2.5 * view.pxPerCm);
+  ctx.strokeStyle = "#16a34a"; // semantik yeşil
+  ctx.lineWidth = 1.5; // ince kesikli çizgi
   ctx.setLineDash([8, 6]);
 
   const w = p1.x - p0.x;
@@ -128,13 +137,13 @@ export function drawParselBoundary(
 
   ctx.strokeRect(p0.x, p0.y, w, h);
 
-  ctx.fillStyle = "#F0FDF41A";
+  ctx.fillStyle = "rgba(22, 163, 74, 0.05)"; // çok hafif yeşil şeffaf dolgu
   ctx.fillRect(p0.x, p0.y, w, h);
 
   ctx.setLineDash([]);
-  ctx.fillStyle = "#16A34A";
+  ctx.fillStyle = "#16a34a";
   ctx.beginPath();
-  ctx.arc(p0.x, p0.y, 6, 0, Math.PI * 2);
+  ctx.arc(p0.x, p0.y, 5, 0, Math.PI * 2);
   ctx.fill();
 
   ctx.font = "bold 11px system-ui, sans-serif";
@@ -149,7 +158,7 @@ const TARGET_STEP_PX = 70;
 export function drawGrid(
   ctx: CanvasRenderingContext2D,
   view: View2D,
-  options: { visible?: boolean; baseStepCm?: number } = {}
+  options: { visible?: boolean; baseStepCm?: number; showAxes?: boolean } = {}
 ) {
   ctx.fillStyle = "#FBFAF7";
   ctx.fillRect(0, 0, view.width, view.height);
@@ -202,23 +211,24 @@ export function drawGrid(
     ctx.stroke();
   }
 
-  // Dünya orijini (0,0) her zaman belirgin bir çizgi çifti ile işaretlenir — sonsuz
-  // tuvalde konum referansı verir.
-  if (origin.x > -20 && origin.x < view.width + 20) {
-    ctx.strokeStyle = "#C7CBCD";
-    ctx.lineWidth = 1.25;
-    ctx.beginPath();
-    ctx.moveTo(origin.x, 0);
-    ctx.lineTo(origin.x, view.height);
-    ctx.stroke();
-  }
-  if (origin.y > -20 && origin.y < view.height + 20) {
-    ctx.strokeStyle = "#C7CBCD";
-    ctx.lineWidth = 1.25;
-    ctx.beginPath();
-    ctx.moveTo(0, origin.y);
-    ctx.lineTo(view.width, origin.y);
-    ctx.stroke();
+  // Dünya orijini (0,0) her zaman belirgin bir çizgi çifti ile işaretlenir
+  if (options.showAxes !== false) {
+    if (origin.x > -20 && origin.x < view.width + 20) {
+      ctx.strokeStyle = "#C7CBCD";
+      ctx.lineWidth = 1.25;
+      ctx.beginPath();
+      ctx.moveTo(origin.x, 0);
+      ctx.lineTo(origin.x, view.height);
+      ctx.stroke();
+    }
+    if (origin.y > -20 && origin.y < view.height + 20) {
+      ctx.strokeStyle = "#C7CBCD";
+      ctx.lineWidth = 1.25;
+      ctx.beginPath();
+      ctx.moveTo(0, origin.y);
+      ctx.lineTo(view.width, origin.y);
+      ctx.stroke();
+    }
   }
 }
 
@@ -320,49 +330,137 @@ export function roomAreaM2(room: Room, corners: Record<string, Corner>): number 
   return cm2ToM2(polygonAreaCm2(roomPolygon(room, corners)));
 }
 
+export function roomPerimeterM(room: Room, corners: Record<string, Corner>): number {
+  const pts = roomPolygon(room, corners);
+  if (pts.length < 2) return 0;
+  let sumCm = 0;
+  for (let i = 0; i < pts.length; i++) {
+    sumCm += dist(pts[i], pts[(i + 1) % pts.length]);
+  }
+  return sumCm / 100;
+}
+
 export function drawRoom(
   ctx: CanvasRenderingContext2D,
   view: View2D,
   room: Room,
   corners: Record<string, Corner>,
   roomType: RoomTypeConfig,
-  selected: boolean
+  selected: boolean,
+  showTag = true
 ) {
   const worldPts = roomPolygon(room, corners);
   if (worldPts.length < 3) return;
   const screenPts = worldPts.map((p) => worldToScreen(view, p));
 
+  ctx.save();
   ctx.beginPath();
   screenPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
   ctx.closePath();
-  ctx.fillStyle = roomType.color + (selected ? "CC" : "99");
+  // Eski bilCAD mantığına dönüş (§ 2026-08-11): oda tipinin rengiyle yarı saydam bir
+  // dolgu — duvarlar bundan ETKİLENMEZ (drawWall ayrı, ince çizgi kalır). Bu dolgu,
+  // çizim SIRASINDAKİ beyaz-siluet önizlemesinden (drawRoomChainPreview) tamamen ayrı;
+  // burası SADECE tamamlanmış/kalıcı Room'lar için.
+  ctx.fillStyle = roomType.color;
+  ctx.globalAlpha = selected ? 0.5 : 0.32;
   ctx.fill();
-  if (selected) {
-    ctx.strokeStyle = COLOR_RUST;
-    ctx.lineWidth = 2;
-    ctx.stroke();
+  ctx.globalAlpha = 1;
+  ctx.strokeStyle = selected ? COLOR_RUST : roomType.color;
+  ctx.lineWidth = selected ? 2.2 : 1.2;
+  ctx.stroke();
+  ctx.restore();
+
+  if (showTag) {
+    const areaM2 = roomAreaM2(room, corners);
+    const centroidWorld = polygonCentroid(worldPts);
+    const centroid = worldToScreen(view, centroidWorld);
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "600 13px 'IBM Plex Sans', sans-serif";
+    ctx.fillStyle = COLOR_INK;
+    ctx.fillText(room.name, centroid.x, centroid.y - 14);
+
+    ctx.font = "12px 'IBM Plex Mono', monospace";
+    ctx.fillStyle = COLOR_BLUEPRINT;
+    ctx.fillText(`H=${room.height}`, centroid.x, centroid.y + 2);
+
+    ctx.fillStyle = COLOR_RUST;
+    ctx.fillText(`S=${areaM2.toFixed(2)} m²`, centroid.x, centroid.y + 18);
+
+    if (room.source === "auto-detected") {
+      drawConfidenceBadge(ctx, { x: centroid.x, y: centroid.y + 36 }, room.confidence);
+    }
   }
+}
 
-  const areaM2 = roomAreaM2(room, corners);
-  const centroidWorld = polygonCentroid(worldPts);
-  const centroid = worldToScreen(view, centroidWorld);
+/**
+ * Bağımsız Bölüm Sınırı (§ Wall/Room/BB semantik ayrımı): SADECE bir gösterge —
+ * fiziksel bir Wall değildir, yeni bir Room da değildir, oda dolgusu gibi davranmaz
+ * (dolgu YOK, krokiyi kapatmaz). Üye odaların köşelerini kapsayan basit bir eksene-hizalı
+ * kutu + ince kesikli çizgi + BB kod etiketi çizer. Gerçek konkav bir çevre-poligonu
+ * (hull) HESAPLAMAZ — bu, çok-odalı BB'ler için kabaca bir görsel gösterge olarak
+ * yeterlidir; kesin geometri gerekiyorsa CityGML tarafında zaten Room'ların kendi
+ * geometrisi kullanılıyor (bkz. cityGmlExport.ts), bu sadece editördeki bir etikettir.
+ */
+export function drawBagimsizBolumBoundary(
+  ctx: CanvasRenderingContext2D,
+  view: View2D,
+  bb: BagimsizBolum,
+  rooms: Room[],
+  corners: Record<string, Corner>
+) {
+  const pts: Pt[] = [];
+  for (const room of rooms) {
+    for (const p of roomPolygon(room, corners)) pts.push(p);
+  }
+  if (pts.length < 3) return;
 
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.font = "600 13px 'IBM Plex Sans', sans-serif";
-  ctx.fillStyle = COLOR_INK;
-  ctx.fillText(room.name, centroid.x, centroid.y - 14);
+  const minX = Math.min(...pts.map((p) => p.x));
+  const maxX = Math.max(...pts.map((p) => p.x));
+  const minY = Math.min(...pts.map((p) => p.y));
+  const maxY = Math.max(...pts.map((p) => p.y));
+  const PAD_CM = 15; // odaların dış duvarlarına çok yapışık görünmesin diye küçük bir boşluk
+  const tl = worldToScreen(view, { x: minX - PAD_CM, y: minY - PAD_CM });
+  const br = worldToScreen(view, { x: maxX + PAD_CM, y: maxY + PAD_CM });
 
-  ctx.font = "12px 'IBM Plex Mono', monospace";
-  ctx.fillStyle = COLOR_BLUEPRINT;
-  ctx.fillText(`H=${room.height}`, centroid.x, centroid.y + 2);
+  ctx.save();
+  ctx.setLineDash([10, 6]);
+  ctx.strokeStyle = COLOR_RUST;
+  ctx.lineWidth = 1.25;
+  ctx.strokeRect(tl.x, tl.y, br.x - tl.x, br.y - tl.y);
+  ctx.setLineDash([]);
 
+  const label = `BB ${bb.kod}`;
+  ctx.font = "700 11px 'IBM Plex Mono', monospace";
+  const w = ctx.measureText(label).width + 10;
   ctx.fillStyle = COLOR_RUST;
-  ctx.fillText(`S=${areaM2.toFixed(2)} m²`, centroid.x, centroid.y + 18);
+  ctx.fillRect(tl.x, tl.y - 18, w, 16);
+  ctx.fillStyle = "#FFFFFF";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "middle";
+  ctx.fillText(label, tl.x + 5, tl.y - 10);
+  ctx.restore();
+}
 
-  if (room.source === "auto-detected") {
-    drawConfidenceBadge(ctx, { x: centroid.x, y: centroid.y + 36 }, room.confidence);
-  }
+/**
+ * Bina Dış Sınırı (§ Wall/Room/BuildingOutline semantik ayrımı, 2026-08-11): Room DEĞİL,
+ * Wall da DEĞİL — kalın, temiz bir dış hat çizgisi. Dolgu yok (oda dolgusuyla
+ * karıştırılmasın), duvarların rengini/kalınlığını da kullanmaz — kendi sabit koyu
+ * tonuyla, diğer her şeyden görsel olarak ayrışan tek bir çizgi.
+ */
+export function drawBuildingOutline(ctx: CanvasRenderingContext2D, view: View2D, outline: BuildingOutline, corners: Record<string, Corner>) {
+  const pts = outline.cornerLoop.map((id) => corners[id]).filter(Boolean) as Pt[];
+  if (pts.length < 3) return;
+  const screenPts = pts.map((p) => worldToScreen(view, p));
+  ctx.save();
+  ctx.beginPath();
+  screenPts.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+  ctx.closePath();
+  ctx.strokeStyle = "#1e293b";
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+  ctx.restore();
 }
 
 export function wallQuad(a: Pt, b: Pt, thickness: number): Pt[] {
@@ -378,12 +476,7 @@ export function wallQuad(a: Pt, b: Pt, thickness: number): Pt[] {
 }
 
 /**
- * Duvar çizimi (§4): teknik çizim geleneğine uygun **çift çizgi** — duvar gövdesi
- * malzeme renginde açık tonda dolgulanır, iki kenarı ince koyu konturla çizilir.
- * (Önceden gövde masif koyu doldurulduğu için duvarlar aşırı kalın/blok görünüyordu.)
- *
- * `fillColor` duvar malzemesinden gelir; böylece sıva/tuğla/beton gibi malzemeler
- * planda birbirinden ayırt edilir.
+ * Duvar çizimi.
  */
 export function drawWall(
   ctx: CanvasRenderingContext2D,
@@ -393,10 +486,35 @@ export function drawWall(
   b: Corner,
   selected: boolean,
   hovered: boolean,
-  fillColor = "#FFFFFF",
+  _fillColor = "#FFFFFF",
   isBalconyRailing = false,
-  renderMode: 'thick' | 'centerline' | 'doubleline' = 'doubleline'
+  renderMode: 'thick' | 'centerline' | 'doubleline' | 'hatch' = 'doubleline',
+  rooms: Room[] = [],
+  roomTypes: RoomTypeConfig[] = []
 ) {
+  // Duvarın bir odaya ait olup olmadığını kontrol et
+  const parentRoom = rooms.find((r) => r.wallLoop.includes(wall.id));
+  const parentRoomType = parentRoom ? roomTypes.find((t) => t.id === parentRoom.typeId) : null;
+  const roomColor = parentRoomType ? parentRoomType.color : null;
+
+  const defaultStrokeColor = "#64748b"; // koyu gri ince CAD çizgileri
+  const strokeColor = selected ? "#2563eb" : hovered ? "#3b82f6" : (roomColor ?? defaultStrokeColor);
+
+  // Seçili duvar: İnce çizgi + hafif mavi highlight (glow)
+  if (selected) {
+    ctx.save();
+    const sa = worldToScreen(view, a);
+    const sb = worldToScreen(view, b);
+    ctx.strokeStyle = "rgba(37, 99, 235, 0.15)";
+    ctx.lineWidth = Math.max(8, wall.thickness * view.pxPerCm + 6);
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(sa.x, sa.y);
+    ctx.lineTo(sb.x, sb.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   if (renderMode === 'centerline') {
     const sa = worldToScreen(view, a);
     const sb = worldToScreen(view, b);
@@ -406,66 +524,48 @@ export function drawWall(
     ctx.lineTo(sb.x, sb.y);
     if (isBalconyRailing || wall.malzeme === "korkuluk") {
       ctx.setLineDash([6, 5]);
-      ctx.strokeStyle = selected ? COLOR_RUST : "#0284C7";
-      ctx.lineWidth = selected ? 2 : 1.5;
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = selected ? 1.5 : hovered ? 1.25 : 1;
     } else if (wall.source === "auto-detected") {
       ctx.setLineDash([6, 4]);
-      ctx.strokeStyle = COLOR_RUST;
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = 1;
     } else {
-      let color = "#1E293B";
-      if (selected) color = "#C1652F";
-      else if (hovered) color = "#2F6690";
-      ctx.strokeStyle = color;
-      ctx.lineWidth = selected ? 2 : hovered ? 1.75 : 1.5;
+      ctx.strokeStyle = strokeColor;
+      ctx.lineWidth = selected ? 1.5 : hovered ? 1.25 : 1;
     }
     ctx.stroke();
     ctx.restore();
-    if (wall.source === "auto-detected") {
-      const mid = worldToScreen(view, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
-      drawConfidenceBadge(ctx, mid, wall.confidence);
-    }
     return;
   }
+
   const quad = wallQuad(a, b, wall.thickness).map((p) => worldToScreen(view, p));
   ctx.beginPath();
   quad.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
   ctx.closePath();
 
   if (isBalconyRailing || wall.malzeme === "korkuluk") {
-    ctx.fillStyle = "#E0F2FE88";
+    ctx.fillStyle = "rgba(224, 242, 254, 0.4)";
     ctx.fill();
     ctx.save();
     ctx.setLineDash([6, 5]);
-    ctx.strokeStyle = selected ? COLOR_RUST : "#0284C7";
-    ctx.lineWidth = selected ? 2.5 : 2;
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = selected ? 1.5 : hovered ? 1.25 : 1;
     ctx.stroke();
     ctx.restore();
     return;
   }
 
-  if (renderMode === 'doubleline') {
-    // AutoCAD tarzı içi boş çift çizgi: Seçildiğinde hafif turuncu dolgu, normalde şeffaf (arkayı kapatmaz)
-    ctx.fillStyle = selected ? "rgba(193, 101, 47, 0.15)" : "transparent";
-  } else {
-    // Dolu kalın duvar görünümü
-    ctx.fillStyle = selected ? "#C1652F33" : fillColor;
+  if (renderMode === 'doubleline' || renderMode === 'hatch' || renderMode === 'thick') {
+    // Çift çizgi aralığı (wall fill): oda rengi dolgusu değildir, hafif nötr grid arkası tonudur.
+    ctx.fillStyle = "rgba(241, 245, 249, 0.75)";
+    ctx.fill();
   }
-  ctx.fill();
 
-  if (wall.source === "auto-detected") {
-    ctx.save();
-    ctx.setLineDash([6, 4]);
-    ctx.strokeStyle = COLOR_RUST;
-    ctx.lineWidth = 1.5;
-    ctx.stroke();
-    ctx.restore();
-  } else {
-    // İnce kontur: zoom'dan bağımsız sabit kalınlık, seçili/hover'da hafif kalınlaşır.
-    ctx.strokeStyle = selected ? COLOR_RUST : hovered ? COLOR_BLUEPRINT : COLOR_INK;
-    ctx.lineWidth = selected ? 1.8 : hovered ? 1.5 : 1;
-    ctx.stroke();
-  }
+  // İnce kontur çizgisi (1px normal, 1.25px hover, 1.5px selected)
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = selected ? 1.5 : hovered ? 1.25 : 1;
+  ctx.stroke();
 
   if (wall.source === "auto-detected") {
     const mid = worldToScreen(view, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
@@ -615,6 +715,90 @@ export function drawDimension(ctx: CanvasRenderingContext2D, view: View2D, a: Pt
   ctx.restore();
 }
 
+/**
+ * Zincirlenmiş ölçü çizgisi (§ mimari ölçülendirme geleneği): oda çevresindeki
+ * her kenar için uzantı çizgisi + tik işareti + uzunluk etiketi üretir. Kalıcı
+ * bir model alanı GEREKTİRMEZ — her frame `roomPolygon`'dan canlı türetilir
+ * (mevcut cetvel/grid çizim yaklaşımıyla aynı ruh, bkz. CanvasEditor rulers).
+ */
+export function drawRoomDimensionChain(ctx: CanvasRenderingContext2D, view: View2D, room: Room, corners: Record<string, Corner>) {
+  const pts = roomPolygon(room, corners);
+  if (pts.length < 3) return;
+  const centroid = polygonCentroid(pts);
+  const offsetCm = 26 / view.pxPerCm;
+  const tickCm = 5 / view.pxPerCm;
+
+  ctx.save();
+  ctx.strokeStyle = COLOR_BLUEPRINT;
+  ctx.lineWidth = 1;
+  ctx.font = "10px 'IBM Plex Mono', monospace";
+  ctx.fillStyle = COLOR_BLUEPRINT;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  for (let i = 0; i < pts.length; i++) {
+    const p1 = pts[i];
+    const p2 = pts[(i + 1) % pts.length];
+    const lengthCm = dist(p1, p2);
+    if (lengthCm < 20) continue; // çok kısa kenarlarda etiket sığmaz, atla
+
+    let perp = perpendicular(p1, p2);
+    const mid = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+    // perpendicular'ın yönü poligonun sarma yönüne bağlı — DIŞA doğru olduğundan
+    // emin olmak için merkez-kenar vektörüyle karşılaştırılır.
+    if ((mid.x - centroid.x) * perp.x + (mid.y - centroid.y) * perp.y < 0) {
+      perp = { x: -perp.x, y: -perp.y };
+    }
+
+    const d1 = { x: p1.x + perp.x * offsetCm, y: p1.y + perp.y * offsetCm };
+    const d2 = { x: p2.x + perp.x * offsetCm, y: p2.y + perp.y * offsetCm };
+    const s1 = worldToScreen(view, p1);
+    const s2 = worldToScreen(view, p2);
+    const sd1 = worldToScreen(view, d1);
+    const sd2 = worldToScreen(view, d2);
+
+    // Uzantı çizgileri (duvardan ölçü çizgisine)
+    ctx.beginPath();
+    ctx.moveTo(s1.x, s1.y);
+    ctx.lineTo(sd1.x, sd1.y);
+    ctx.moveTo(s2.x, s2.y);
+    ctx.lineTo(sd2.x, sd2.y);
+    ctx.stroke();
+
+    // Ölçü çizgisi
+    ctx.beginPath();
+    ctx.moveTo(sd1.x, sd1.y);
+    ctx.lineTo(sd2.x, sd2.y);
+    ctx.stroke();
+
+    // Tik işaretleri (45° kısa çentikler, mimari ölçülendirme geleneği)
+    const dirX = (d2.x - d1.x) / lengthCm;
+    const dirY = (d2.y - d1.y) / lengthCm;
+    for (const dPt of [d1, d2]) {
+      const t1 = { x: dPt.x - (dirX + perp.x) * tickCm, y: dPt.y - (dirY + perp.y) * tickCm };
+      const t2 = { x: dPt.x + (dirX + perp.x) * tickCm, y: dPt.y + (dirY + perp.y) * tickCm };
+      const st1 = worldToScreen(view, t1);
+      const st2 = worldToScreen(view, t2);
+      ctx.beginPath();
+      ctx.moveTo(st1.x, st1.y);
+      ctx.lineTo(st2.x, st2.y);
+      ctx.stroke();
+    }
+
+    // Uzunluk etiketi
+    const dMid = { x: (d1.x + d2.x) / 2, y: (d1.y + d2.y) / 2 };
+    const labelScreen = worldToScreen(view, dMid);
+    const angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+    const flip = angle > Math.PI / 2 || angle < -Math.PI / 2;
+    ctx.save();
+    ctx.translate(labelScreen.x, labelScreen.y);
+    ctx.rotate(flip ? angle + Math.PI : angle);
+    ctx.fillText(`${Math.round(lengthCm)}`, 0, -6);
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
 export function drawCornerHandle(
   ctx: CanvasRenderingContext2D,
   view: View2D,
@@ -663,30 +847,210 @@ export function drawComponent(
   const quad = wallQuad(p1, p2, wallThickness).map((p) => worldToScreen(view, p));
 
   const isDoor = comp.tip === "kapi";
+  const isWindow = comp.tip === "pencere";
+  // Seçim vurgusu (seçili olduğunda hafif kalın seçim çizgisi)
+  if (selected) {
+    ctx.save();
+    ctx.beginPath();
+    quad.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
+    ctx.closePath();
+    ctx.strokeStyle = "rgba(193, 101, 47, 0.4)";
+    ctx.lineWidth = 4;
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // Duvar kesim sınırlarını çiz
+  ctx.strokeStyle = "#475569";
+  ctx.lineWidth = 1.2;
+  // Sol kesim yüzü (p1)
   ctx.beginPath();
-  quad.forEach((p, i) => (i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y)));
-  ctx.closePath();
-  ctx.fillStyle = "#FBFAF7";
-  ctx.fill();
-  ctx.strokeStyle = selected ? COLOR_RUST : isDoor ? COLOR_RUST : COLOR_BLUEPRINT;
-  ctx.lineWidth = selected ? 3 : 2;
+  ctx.moveTo(quad[0].x, quad[0].y);
+  ctx.lineTo(quad[3].x, quad[3].y);
+  ctx.stroke();
+  // Sağ kesim yüzü (p2)
+  ctx.beginPath();
+  ctx.moveTo(quad[1].x, quad[1].y);
+  ctx.lineTo(quad[2].x, quad[2].y);
   ctx.stroke();
 
   if (isDoor) {
-    // kapı kanadı + açılış yayı (basit gösterim)
-    const hinge = worldToScreen(view, p1);
-    const swingEnd = worldToScreen(view, { x: p1.x - dirY * widthCm, y: p1.y + dirX * widthCm });
+    // Gerçek mimari kapı sembolü: menteşeden dik açılmış kanat + kanat ucundan
+    // karşı pervaza (p2) süpüren çeyrek daire açılış yayı.
+    const hingeWorld = p1;
+    const swingEndWorld = { x: p1.x - dirY * widthCm, y: p1.y + dirX * widthCm };
+    const hinge = worldToScreen(view, hingeWorld);
+    const swingEnd = worldToScreen(view, swingEndWorld);
+    const farJamb = worldToScreen(view, p2);
+
+    ctx.strokeStyle = COLOR_RUST;
+    ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(hinge.x, hinge.y);
     ctx.lineTo(swingEnd.x, swingEnd.y);
-    ctx.strokeStyle = COLOR_RUST;
-    ctx.lineWidth = 1;
     ctx.stroke();
+
+    const radius = Math.hypot(farJamb.x - hinge.x, farJamb.y - hinge.y);
+    const startAngle = Math.atan2(swingEnd.y - hinge.y, swingEnd.x - hinge.x);
+    const endAngle = Math.atan2(farJamb.y - hinge.y, farJamb.x - hinge.x);
+    ctx.beginPath();
+    ctx.setLineDash([3, 3]);
+    ctx.arc(hinge.x, hinge.y, radius, startAngle, endAngle);
+    ctx.stroke();
+    ctx.setLineDash([]);
+  } else if (isWindow) {
+    // Gerçek mimari pencere sembolü: duvar kalınlığı boyunca çift ince paralel çizgi (cam).
+    const s1 = worldToScreen(view, p1);
+    const s2 = worldToScreen(view, p2);
+    const perpX = -dirY;
+    const perpY = dirX;
+    const halfThickPx = (wallThickness / 2) * view.pxPerCm * 0.5;
+    ctx.strokeStyle = selected ? COLOR_RUST : COLOR_BLUEPRINT;
+    ctx.lineWidth = 1;
+    for (const sign of [-1, 1]) {
+      ctx.beginPath();
+      ctx.moveTo(s1.x + perpX * halfThickPx * sign, s1.y + perpY * halfThickPx * sign);
+      ctx.lineTo(s2.x + perpX * halfThickPx * sign, s2.y + perpY * halfThickPx * sign);
+      ctx.stroke();
+    }
   }
 
   if (comp.source === "auto-detected") {
     const midWorld = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
     drawConfidenceBadge(ctx, worldToScreen(view, midWorld), comp.confidence);
+  }
+}
+
+/**
+ * En sık kullanılan 8 mobilya/tesisat alt tipi için elle çizilmiş, tanınabilir
+ * siluetler (§ "gerçek mobilya ikonları"). `ctx` zaten bileşenin merkezine
+ * çevrilmiş/döndürülmüş local koordinat sisteminde — w/d ekran pikseli
+ * cinsinden, dikdörtgen [-w/2,-d/2, w, d]. Tanınmayan alt tipler için `false`
+ * döner, çağıran taraf mevcut etiket-metni fallback'ine düşer.
+ */
+function drawFurnitureIcon(ctx: CanvasRenderingContext2D, subtypeId: string, w: number, d: number): boolean {
+  const strokeColor = COLOR_INK;
+  ctx.strokeStyle = strokeColor;
+  ctx.lineWidth = 1;
+
+  switch (subtypeId) {
+    case "koltuk":
+    case "tekli_koltuk": {
+      // Kanepe: gövde + sırt minderi çizgisi + iki kolçak
+      const armW = w * 0.12;
+      ctx.beginPath();
+      ctx.rect(-w / 2, -d / 2, w, d);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.rect(-w / 2, -d / 2, armW, d);
+      ctx.rect(w / 2 - armW, -d / 2, armW, d);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(-w / 2 + armW, -d / 2 + d * 0.32);
+      ctx.lineTo(w / 2 - armW, -d / 2 + d * 0.32);
+      ctx.stroke();
+      return true;
+    }
+    case "yemek_masasi": {
+      // Yemek masası: yuvarlatılmış dikdörtgen gövde
+      const r = Math.min(w, d) * 0.12;
+      ctx.beginPath();
+      ctx.roundRect?.(-w / 2, -d / 2, w, d, r) ?? ctx.rect(-w / 2, -d / 2, w, d);
+      ctx.stroke();
+      return true;
+    }
+    case "sandalye": {
+      // Sandalye: küçük kare oturak + sırt çizgisi
+      ctx.beginPath();
+      ctx.rect(-w / 2, -d / 2 + d * 0.2, w, d * 0.8);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(-w / 2, -d / 2 + d * 0.2);
+      ctx.lineTo(w / 2, -d / 2 + d * 0.2);
+      ctx.lineWidth = 2.5;
+      ctx.stroke();
+      ctx.lineWidth = 1;
+      return true;
+    }
+    case "yatak_tek":
+    case "yatak_cift": {
+      // Yatak: gövde + yastık(lar) + katlanma çizgisi
+      ctx.beginPath();
+      ctx.rect(-w / 2, -d / 2, w, d);
+      ctx.stroke();
+      const pillowH = d * 0.18;
+      const pillowCount = subtypeId === "yatak_cift" ? 2 : 1;
+      const pillowW = (w * 0.8) / pillowCount - 4;
+      for (let i = 0; i < pillowCount; i++) {
+        const px = -w * 0.4 + i * (pillowW + 8);
+        ctx.beginPath();
+        ctx.rect(px, -d / 2 + d * 0.06, pillowW, pillowH);
+        ctx.stroke();
+      }
+      ctx.beginPath();
+      ctx.moveTo(-w / 2, -d / 2 + d * 0.32);
+      ctx.lineTo(w / 2, -d / 2 + d * 0.32);
+      ctx.stroke();
+      return true;
+    }
+    case "gardirop": {
+      // Gardırop: gövde + çift kapı orta çizgisi + köşe diyagonalleri (derinlik hissi)
+      ctx.beginPath();
+      ctx.rect(-w / 2, -d / 2, w, d);
+      ctx.moveTo(0, -d / 2);
+      ctx.lineTo(0, d / 2);
+      ctx.moveTo(-w / 2, -d / 2);
+      ctx.lineTo(-w / 2 + Math.min(w, d) * 0.25, d / 2);
+      ctx.moveTo(w / 2, -d / 2);
+      ctx.lineTo(w / 2 - Math.min(w, d) * 0.25, d / 2);
+      ctx.stroke();
+      return true;
+    }
+    case "tv_unitesi": {
+      // TV ünitesi: alçak gövde + üstte ortalanmış ekran dikdörtgeni
+      ctx.beginPath();
+      ctx.rect(-w / 2, -d / 2, w, d);
+      ctx.stroke();
+      const screenW = w * 0.5;
+      ctx.strokeRect(-screenW / 2, -d / 2 - d * 0.5, screenW, d * 0.35);
+      return true;
+    }
+    case "mutfak_tezgahi": {
+      // Mutfak tezgahı: gövde + iki ocak gözü dairesi
+      ctx.beginPath();
+      ctx.rect(-w / 2, -d / 2, w, d);
+      ctx.stroke();
+      const r = Math.min(w, d) * 0.14;
+      ctx.beginPath();
+      ctx.arc(-w * 0.2, 0, r, 0, Math.PI * 2);
+      ctx.moveTo(w * 0.2 + r, 0);
+      ctx.arc(w * 0.2, 0, r, 0, Math.PI * 2);
+      ctx.stroke();
+      return true;
+    }
+    case "lavabo": {
+      // Lavabo: gövde dikdörtgeni + oval hazne
+      ctx.beginPath();
+      ctx.rect(-w / 2, -d / 2, w, d);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(0, 0, w * 0.32, d * 0.28, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      return true;
+    }
+    case "klozet": {
+      // Klozet: arka rezervuar dikdörtgeni + oval kase
+      const tankH = d * 0.28;
+      ctx.beginPath();
+      ctx.rect(-w * 0.4, -d / 2, w * 0.8, tankH);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.ellipse(0, d * 0.08, w * 0.42, d * 0.4, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      return true;
+    }
+    default:
+      return false;
   }
 }
 
@@ -713,13 +1077,19 @@ export function drawFloorComponent(
   ctx.rect(-w / 2, -d / 2, w, d);
   ctx.fill();
   ctx.stroke();
+
+  // Gerçek vektör ikonu (§ "gerçek mobilya ikonları") — bilinen 8 alt tip için;
+  // tanınmayanlar mevcut etiket-metni fallback'inde kalır.
+  const hasIcon = drawFurnitureIcon(ctx, comp.altTip, w, d);
   ctx.restore();
 
-  ctx.font = "11px 'IBM Plex Sans', sans-serif";
-  ctx.fillStyle = COLOR_INK;
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(comp.altTip, c.x, c.y);
+  if (!hasIcon) {
+    ctx.font = "11px 'IBM Plex Sans', sans-serif";
+    ctx.fillStyle = COLOR_INK;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(comp.altTip, c.x, c.y);
+  }
 
   if (comp.source === "auto-detected") {
     drawConfidenceBadge(ctx, { x: c.x, y: c.y - d / 2 - 8 }, comp.confidence);
@@ -818,11 +1188,14 @@ export function drawRoomDraft(ctx: CanvasRenderingContext2D, view: View2D, p0: P
   const h = br.y - tl.y;
 
   ctx.save();
-  ctx.fillStyle = "#2F669022";
+  // Arkadaki ızgara/kroki çizgilerini örten beyaz siluet dolgusu — oda rengiyle değil.
+  ctx.fillStyle = "#FFFFFF";
+  ctx.globalAlpha = 0.92;
   ctx.fillRect(tl.x, tl.y, w, h);
+  ctx.globalAlpha = 1;
   ctx.setLineDash([6, 4]);
   ctx.strokeStyle = COLOR_BLUEPRINT;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = 1;
   ctx.strokeRect(tl.x, tl.y, w, h);
   ctx.restore();
 
@@ -844,16 +1217,18 @@ export function drawRoomDraft(ctx: CanvasRenderingContext2D, view: View2D, p0: P
 
 /**
  * "Oda" aracının varsayılan tık-tık-tık serbest çokgen modu için canlı önizleme:
- * şimdiye kadar yerleştirilen köşeler + imlecin anlık konumuyla oluşan alan, henüz
- * döngü kapanmadan (son duvar bırakılmadan) seçili oda tipinin rengiyle dolgulanır
- * (§13 "kapanmakta olan alanın canlı renklenmesi").
+ * şimdiye kadar yerleştirilen köşeler + imlecin anlık konumuyla oluşan alan çizilirken
+ * arkadaki ızgara/kroki çizgilerini örtmek için BEYAZ bir siluet dolgusu kullanılır —
+ * oda tipinin rengiyle değil (§ "arkadan geçen silüet oda renginde değil beyaz olacak").
+ * Çizim bitip oda kesinleştiğinde (drawRoom) bu dolgu tamamen kalkar, sadece ince
+ * kontur kalır.
  */
 export function drawRoomChainPreview(
   ctx: CanvasRenderingContext2D,
   view: View2D,
   points: Pt[],
   cursor: Pt | null,
-  fillColor: string
+  _fillColor?: string
 ) {
   if (points.length === 0) return;
   const allPts = cursor ? [...points, cursor] : points;
@@ -867,8 +1242,8 @@ export function drawRoomChainPreview(
       else ctx.lineTo(s.x, s.y);
     });
     ctx.closePath();
-    ctx.fillStyle = fillColor;
-    ctx.globalAlpha = 0.45;
+    ctx.fillStyle = "#FFFFFF";
+    ctx.globalAlpha = 0.92;
     ctx.fill();
     ctx.restore();
 
@@ -883,7 +1258,7 @@ export function drawRoomChainPreview(
 
   ctx.save();
   ctx.strokeStyle = "#3B82F6";
-  ctx.lineWidth = 1.5;
+  ctx.lineWidth = 1;
   ctx.beginPath();
   points.forEach((p, i) => {
     const s = worldToScreen(view, p);

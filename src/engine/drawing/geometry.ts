@@ -196,6 +196,82 @@ export function snapToGrid(p: Pt, stepCm = 10): Pt {
   return { x: Math.round(p.x / stepCm) * stepCm, y: Math.round(p.y / stepCm) * stepCm };
 }
 
+/**
+ * İki SONSUZ doğrunun kesişimi (segmentIntersection'ın aksine uç noktalarla
+ * sınırlı değil) — Trim/Extend aracı için: bir duvarı, gövdesinde kesişmese
+ * bile hedef duvarın doğrusuna kadar kısaltmak/uzatmak amacıyla kullanılır.
+ * Paralelse (veya çakışıksa) null döner.
+ */
+export function infiniteLineIntersection(a1: Pt, a2: Pt, b1: Pt, b2: Pt): Pt | null {
+  const d1x = a2.x - a1.x;
+  const d1y = a2.y - a1.y;
+  const d2x = b2.x - b1.x;
+  const d2y = b2.y - b1.y;
+  const denom = d1x * d2y - d1y * d2x;
+  if (Math.abs(denom) < 1e-9) return null;
+  const t = ((b1.x - a1.x) * d2y - (b1.y - a1.y) * d2x) / denom;
+  return { x: a1.x + t * d1x, y: a1.y + t * d1y };
+}
+
+/** Bir noktayı verilen birim yön vektörü boyunca distanceCm kadar öteler. */
+export function offsetPoint(p: Pt, direction: Pt, distanceCm: number): Pt {
+  const len = Math.hypot(direction.x, direction.y) || 1;
+  return { x: p.x + (direction.x / len) * distanceCm, y: p.y + (direction.y / len) * distanceCm };
+}
+
+/**
+ * Bir duvar segmentini kendi doğrultusuna DİK yönde distanceCm kadar öteler
+ * (Offset aracı). Pozitif değer `perpendicular(a,b)` yönünde, negatif tersi
+ * yöndedir. Segmentin uzunluğu/doğrultusu değişmez, sadece paralel taşınır.
+ */
+export function offsetSegment(a: Pt, b: Pt, distanceCm: number): [Pt, Pt] {
+  const perp = perpendicular(a, b);
+  return [offsetPoint(a, perp, distanceCm), offsetPoint(b, perp, distanceCm)];
+}
+
+/**
+ * Kroki (DWG/DXF vectorTrace) yerleştirme dönüşümü — TEK kaynak: render, snap
+ * ve döndürme kolu hit-test'i AYNI matematiği kullanır, aralarında sapma olmaz.
+ * Sıra: local (yerel bbox koordinatı) → ölçek → rotasyon → parsel dünya konumu.
+ */
+export interface PlacementTransform {
+  x: number;
+  y: number;
+  rotationDeg: number;
+  scale: number;
+}
+
+export function applyTransform(local: Pt, t: PlacementTransform): Pt {
+  const rad = (t.rotationDeg * Math.PI) / 180;
+  const sx = local.x * t.scale;
+  const sy = local.y * t.scale;
+  return {
+    x: t.x + sx * Math.cos(rad) - sy * Math.sin(rad),
+    y: t.y + sx * Math.sin(rad) + sy * Math.cos(rad),
+  };
+}
+
+export function invertTransform(world: Pt, t: PlacementTransform): Pt {
+  const rad = (-t.rotationDeg * Math.PI) / 180;
+  const dx = world.x - t.x;
+  const dy = world.y - t.y;
+  const rx = dx * Math.cos(rad) - dy * Math.sin(rad);
+  const ry = dx * Math.sin(rad) + dy * Math.cos(rad);
+  const scale = t.scale === 0 ? 1 : t.scale;
+  return { x: rx / scale, y: ry / scale };
+}
+
+/** Döndürülmüş bir dikdörtgenin eksene-hizalı bounding box boyutu (parsele sığdırma/taşma kontrolü için). */
+export function rotatedBBoxExtent(width: number, height: number, rotationDeg: number): { width: number; height: number } {
+  const rad = (rotationDeg * Math.PI) / 180;
+  const cos = Math.abs(Math.cos(rad));
+  const sin = Math.abs(Math.sin(rad));
+  return {
+    width: width * cos + height * sin,
+    height: width * sin + height * cos,
+  };
+}
+
 /** Ray-casting point-in-polygon testi. */
 export function pointInPolygon(p: Pt, polygon: Pt[]): boolean {
   let inside = false;
@@ -207,5 +283,21 @@ export function pointInPolygon(p: Pt, polygon: Pt[]): boolean {
     if (intersect) inside = !inside;
   }
   return inside;
+}
+
+/**
+ * `pointInPolygon` katı ray-casting testi sınır üzerindeki noktalar için kararsızdır
+ * (kayan nokta hassasiyeti). Bir odanın bölme duvarıyla ikiye ayrılması gibi durumlarda
+ * yeni odanın köşeleri sıklıkla eski odanın sınırıyla TAM örtüşür (paylaşılan duvar/köşe)
+ * — bu yüzden "içeride VEYA sınırda" testine ihtiyaç var (§ eski oda emekliye ayırma).
+ */
+export function pointInOrOnPolygon(p: Pt, polygon: Pt[], toleranceCm = 1): boolean {
+  if (pointInPolygon(p, polygon)) return true;
+  for (let i = 0; i < polygon.length; i++) {
+    const a = polygon[i];
+    const b = polygon[(i + 1) % polygon.length];
+    if (projectPointToSegment(p, a, b).distance <= toleranceCm) return true;
+  }
+  return false;
 }
 

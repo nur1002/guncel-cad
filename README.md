@@ -7,7 +7,8 @@ Belediyeler için web tabanlı, akıllı kat planı / CAD çizim uygulaması. DW
 - **Node.js 20+** ve npm
 - Modern bir tarayıcı (Chrome/Edge/Firefox — WebAssembly desteği gerekir)
 
-## Kurulum ve Çalıştırma
+## Kurulum ve Çalıştırmagit i
+nig
 
 ```bash
 git clone https://github.com/nur1002/ilkcad.git

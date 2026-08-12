@@ -45,8 +45,8 @@ export function generateTypeColor(
   };
   const b = band[category];
   const hue = Math.round(b.hueStart + (total > 1 ? (index * b.hueSpan) / total : 0)) % 360;
-  // Doygun çip renkleri belirgin; pastel dolgu renkleri açık ki üstündeki etiket okunsun.
-  return vivid ? hslToHex(hue, 72, 55) : hslToHex(hue, 42, 82);
+  // Doygunluğu düşük ince CAD çizgileri üretir
+  return vivid ? hslToHex(hue, 60, 50) : hslToHex(hue, 45, 60);
 }
 
 function hslToHex(h: number, s: number, l: number): string {
@@ -70,6 +70,8 @@ const bagimsizBolumTipleri = [
   ["banyo", "Banyo", "Banyo"],
   ["salon", "Salon", "Salon"],
   ["mutfak", "Mutfak", "Mutfak"],
+  ["yatak_odasi", "Yatak Odası", "Yatak O."],
+  ["antre", "Antre", "Antre"],
   ["kiler", "Kiler", "Kiler"],
   ["tuvalet", "Tuvalet", "Tuvalet"],
   ["kis_bahcesi", "Kış Bahçesi", "Kış Bahçesi"],
@@ -100,8 +102,10 @@ const ortakAlanTipleri = [
   ["teknik_hacim", "Teknik Hacim", "Teknik Hac."],
 ] as const;
 
+// "bina_dis_siniri" artık burada YOK — gerçek bir BuildingOutline nesnesi/aracı var
+// (§ Wall/Room/BuildingOutline semantik ayrımı, 2026-08-11); Room-tipi olarak kalması
+// "her şeyi Room yap" hatasının ta kendisiydi.
 const digerBilesenTipleri = [
-  ["bina_dis_siniri", "Bina Dış Sınırı", "Bina Dış S."],
   ["cati", "Çatı", "Çatı"],
   ["kapi_bilesen", "Kapı", "Kapı"],
   ["pencere_bilesen", "Pencere", "Pencere"],

@@ -100,6 +100,11 @@ export const defaultCatalog: CatalogCategory[] = [
     subtypes: [
       { id: "merdiven", label: "Merdiven", icon: "🪜", attributes: mobilyaOznitelikleri(120, 300, 270) },
       { id: "asansor", label: "Asansör", icon: "▣", attributes: mobilyaOznitelikleri(150, 150, 270) },
+      { id: "yangin_merdiveni", label: "Yangın Merdiveni", icon: "🪜", attributes: mobilyaOznitelikleri(120, 300, 270) },
+      // Kolon gerçek bir yapısal nesne — Room DEĞİL (§ Wall/Room semantik ayrımı,
+      // 2026-08-11). 50cm+ yuvarlak kolonların 12 kenarlı poligon kuralı ileride
+      // validation turunda ele alınacak, şimdilik dikdörtgen/kare kesit.
+      { id: "kolon", label: "Kolon", icon: "◼", attributes: mobilyaOznitelikleri(40, 40, 270) },
     ],
   },
   {

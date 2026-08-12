@@ -33,6 +33,8 @@ export interface SnapOptions {
   anchor?: Pt | null;
   /** Kılavuz çizgilerini çizerken görünür alanın büyüklüğü (ekranı kaplasın diye). */
   guideExtentCm?: number;
+  /** Ortho (dik açı kilidi) açık mı — açıksa 0/45/90/135° açı kilidi uygulanır. */
+  orthoEnabled?: boolean;
 }
 
 const DEFAULT_SNAP_RADIUS_PX = 12;
@@ -310,14 +312,18 @@ export function computeSmartGuides(
   const refPoints =
     opts.referencePoints ?? [...Object.values(variant.corners).map((c) => ({ x: c.x, y: c.y })), ...traceCornerWorldPoints(variant)];
 
-  // Yatay/dikey hizalama: diğer köşelerle aynı X veya Y eksenine manyetik çekim.
+  // Yatay/dikey hizalama: diğer köşelerle aynı X veya Y eksenine manyetik çekim —
+  // SADECE Snap açıkken (§ "kullanıcı istemediği halde otomatik hizalama yapılmamalı").
+  // Snap kapalıyken kullanıcının verdiği ham koordinat aynen kullanılır.
   let bestVertical: { x: number; d: number } | null = null;
   let bestHorizontal: { y: number; d: number } | null = null;
-  for (const p of refPoints) {
-    const dx = Math.abs(p.x - rawPoint.x);
-    if (dx <= guideRadiusCm && (!bestVertical || dx < bestVertical.d)) bestVertical = { x: p.x, d: dx };
-    const dy = Math.abs(p.y - rawPoint.y);
-    if (dy <= guideRadiusCm && (!bestHorizontal || dy < bestHorizontal.d)) bestHorizontal = { y: p.y, d: dy };
+  if (opts.snapEnabled) {
+    for (const p of refPoints) {
+      const dx = Math.abs(p.x - rawPoint.x);
+      if (dx <= guideRadiusCm && (!bestVertical || dx < bestVertical.d)) bestVertical = { x: p.x, d: dx };
+      const dy = Math.abs(p.y - rawPoint.y);
+      if (dy <= guideRadiusCm && (!bestHorizontal || dy < bestHorizontal.d)) bestHorizontal = { y: p.y, d: dy };
+    }
   }
   if (bestVertical) {
     point.x = bestVertical.x;
@@ -328,7 +334,8 @@ export function computeSmartGuides(
     guides.push({ a: { x: -extent, y: bestHorizontal.y }, b: { x: extent, y: bestHorizontal.y }, kind: "horizontal" });
   }
 
-  // Açı kilidi: çapa noktası varsa 0/45/90/135° gibi artışlara kilitle + açı etiketi göster.
+  // Açı kilidi: çapa noktası varsa 0/45/90/135° gibi artışlara kilitle + açı etiketi göster —
+  // SADECE Ortho açıkken. Ortho kapalıyken kullanıcı serbest açıda çizebilir.
   let angleDeg: number | null = null;
   let lengthCm: number | null = null;
   if (opts.anchor) {
@@ -342,7 +349,7 @@ export function computeSmartGuides(
       const angleRad = Math.atan2(dy, dx);
       const nearestRad = Math.round(angleRad / incRad) * incRad;
       const diffDeg = Math.abs((((angleRad - nearestRad) * 180) / Math.PI + 540) % 360) - 180;
-      if (!bestVertical && !bestHorizontal && Math.abs(diffDeg) <= ANGLE_THRESHOLD_DEG) {
+      if (opts.orthoEnabled && !bestVertical && !bestHorizontal && Math.abs(diffDeg) <= ANGLE_THRESHOLD_DEG) {
         point = { x: anchor.x + Math.cos(nearestRad) * distance, y: anchor.y + Math.sin(nearestRad) * distance };
         angleDeg = Math.round((nearestRad * 180) / Math.PI);
         guides.push({
