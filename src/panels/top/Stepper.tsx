@@ -37,6 +37,8 @@ export default function Stepper() {
                 useStore.setState({ planMode: "3d" });
               } else if (s.id === "cizim2d") {
                 useStore.setState({ planMode: "2d" });
+              } else if (s.id === "alan_yapi") {
+                useStore.setState({ planMode: "3d" });
               }
             }}
           >

@@ -41,16 +41,8 @@ export default function View3D() {
   const keysRef = useRef<Record<string, boolean>>({});
   const activeFloorBaseZRef = useRef(0);
 
-  const fpsMode = useStore((s) => s.fpsMode);
-  const toggleFpsMode = useStore((s) => s.toggleFpsMode);
   const showCeiling = useStore((s) => s.showCeiling);
   const toggleCeiling = useStore((s) => s.toggleCeiling);
-  const setPlanMode = useStore((s) => s.setPlanMode);
-  const setWorkflowStage = useStore((s) => s.setWorkflowStage);
-  const goTo2D = () => {
-    setPlanMode("2d");
-    setWorkflowStage("cizim2d");
-  };
   const wallMaterials = useStore((s) => s.wallMaterials);
   const floorMaterials = useStore((s) => s.floorMaterials);
   const pages = useStore((s) => s.pages);
@@ -62,10 +54,9 @@ export default function View3D() {
   const variant = currentPage.drawing;
   const pushToast = useStore((s) => s.pushToast);
 
+  const [sayfaBilgileriOpen, setSayfaBilgileriOpen] = useState(true);
+
   // 3D Portal State
-  const [cameraMode, setCameraMode] = useState<"orbit" | "walk">("orbit");
-  const [ogelerExpanded, setOgelerExpanded] = useState(true);
-  const [malzemeExpanded, setMalzemeExpanded] = useState(true);
   // Gerçek nesne seçimi (raycasting) — "Seçili Eleman" kartı artık statik değil.
   const [selectedElement, setSelectedElement] = useState<{ pageId: string; roomId: string } | null>(null);
   const raycasterRef = useRef(new THREE.Raycaster());
@@ -84,34 +75,56 @@ export default function View3D() {
     sectionCutHeightRef.current = sectionCutHeightCm;
   }, [sectionCutOn, sectionCutHeightCm]);
 
-  // Layer check states
-  const [layerStates, setLayerStates] = useState({
-    bina: true,
-    kat3: true,
-    kat2: true,
-    kat1: true,
-    zemin: true,
-    duvarlar: true,
-    kapilar: true,
-    pencereler: true,
-    balkonlar: true,
-    cati: true,
-    merdiven: true,
-    diger: false,
-  });
-
-  const toggleLayerState = (key: keyof typeof layerStates) => {
-    setLayerStates((prev) => ({ ...prev, [key]: !prev[key] }));
-  };
-
   // --- Three.js Scene Setup ---
   useEffect(() => {
     const mount = mountRef.current;
     if (!mount) return;
-
     const scene = new THREE.Scene();
     scene.background = new THREE.Color("#CBD5E1");
     sceneRef.current = scene;
+
+    // --- Ground CAD / GIS Pixelated Grid Map ---
+    const gridSize = 30000;
+    const gridDivisions = 300; // 100cm (1m) grid squares
+    const gridHelper = new THREE.GridHelper(gridSize, gridDivisions, 0x475569, 0x94a3b8);
+    gridHelper.position.y = -0.5;
+    scene.add(gridHelper);
+
+    // Pixelated Map Tile texture ground plane
+    const groundCanvas = document.createElement("canvas");
+    groundCanvas.width = 64;
+    groundCanvas.height = 64;
+    const gctx = groundCanvas.getContext("2d");
+    if (gctx) {
+      gctx.fillStyle = "#cbd5e1";
+      gctx.fillRect(0, 0, 64, 64);
+      // Checkered pixel tiles
+      gctx.fillStyle = "#b0c4de";
+      gctx.fillRect(0, 0, 32, 32);
+      gctx.fillRect(32, 32, 32, 32);
+      // Pixelated grid lines
+      gctx.strokeStyle = "#64748b";
+      gctx.lineWidth = 1;
+      gctx.strokeRect(0, 0, 64, 64);
+    }
+    const groundTexture = new THREE.CanvasTexture(groundCanvas);
+    groundTexture.wrapS = THREE.RepeatWrapping;
+    groundTexture.wrapT = THREE.RepeatWrapping;
+    groundTexture.repeat.set(300, 300);
+    groundTexture.magFilter = THREE.NearestFilter;
+    groundTexture.minFilter = THREE.NearestFilter;
+
+    const groundGeo = new THREE.PlaneGeometry(gridSize, gridSize);
+    groundGeo.rotateX(-Math.PI / 2);
+    const groundMat = new THREE.MeshStandardMaterial({
+      map: groundTexture,
+      roughness: 0.8,
+      metalness: 0.1,
+    });
+    const groundMesh = new THREE.Mesh(groundGeo, groundMat);
+    groundMesh.position.y = -1;
+    groundMesh.receiveShadow = true;
+    scene.add(groundMesh);
 
     const camera = new THREE.PerspectiveCamera(55, mount.clientWidth / mount.clientHeight, 1, 50000);
     camera.position.set(900, 950, 900);
@@ -362,17 +375,18 @@ export default function View3D() {
     orbitRef.current.update();
   };
 
-  // İsimli kamera görünümleri (§ "GÖRÜNÜMLER" sekme şeridi): sabit
-  // pozisyon+hedef setleri — parsel boyutuna göre makul bir mesafeden.
-  const viewSpan = Math.max(parsel.widthCm, parsel.lengthCm, 1000);
+  // İsimli kamera görünümleri (§ "GÖRÜNÜMLER" sekme şeridi):
+  // Parsel ve bina boyutuna oranla ideal orta yakınlıkta kamera mesafe seti.
+  const buildingSpan = Math.max(1200, Math.min(parsel.widthCm * 0.32, parsel.lengthCm * 0.32, 2200));
+  const heightCenter = 150; // 3D binanın dikey merkez kotu (~1.5m)
   const CAMERA_PRESETS: Record<string, { pos: [number, number, number]; target: [number, number, number] }> = {
-    "3D İzometrik": { pos: [viewSpan * 0.7, viewSpan * 0.75, viewSpan * 0.7], target: [0, 0, 0] },
-    "3D Perspektif": { pos: [viewSpan * 0.5, viewSpan * 0.35, viewSpan * 0.9], target: [0, 100, 0] },
-    "Üstten": { pos: [0, viewSpan * 1.1, 0.01], target: [0, 0, 0] },
-    "Önden": { pos: [0, viewSpan * 0.25, viewSpan * 0.9], target: [0, 100, 0] },
-    "Arka Görünüm": { pos: [0, viewSpan * 0.25, -viewSpan * 0.9], target: [0, 100, 0] },
-    "Sol Görünüm": { pos: [-viewSpan * 0.9, viewSpan * 0.25, 0], target: [0, 100, 0] },
-    "Sağ Görünüm": { pos: [viewSpan * 0.9, viewSpan * 0.25, 0], target: [0, 100, 0] },
+    "3D İzometrik": { pos: [buildingSpan * 0.85, buildingSpan * 0.8, buildingSpan * 0.85], target: [0, heightCenter, 0] },
+    "3D Perspektif": { pos: [buildingSpan * 0.65, buildingSpan * 0.45, buildingSpan * 1.0], target: [0, heightCenter, 0] },
+    "Üstten": { pos: [0, buildingSpan * 1.4, 0.01], target: [0, 0, 0] },
+    "Önden": { pos: [0, heightCenter + 50, buildingSpan * 0.95], target: [0, heightCenter, 0] },
+    "Arka Görünüm": { pos: [0, heightCenter + 50, -buildingSpan * 0.95], target: [0, heightCenter, 0] },
+    "Sol Görünüm": { pos: [-buildingSpan * 0.95, heightCenter + 50, 0], target: [0, heightCenter, 0] },
+    "Sağ Görünüm": { pos: [buildingSpan * 0.95, heightCenter + 50, 0], target: [0, heightCenter, 0] },
   };
   const [activeView, setActiveView] = useState("3D İzometrik");
   const applyCameraPreset = (name: string) => {
@@ -386,89 +400,12 @@ export default function View3D() {
 
   return (
     <div className="portal3d-container">
-      {/* Top 3D Header Bar (Image 1) */}
-      <header className="portal3d-header">
-        <div className="portal3d-brand">
-          <div className="portal3d-logo-icon">🏢</div>
-          <div className="portal3d-brand-text">
-            <span className="brand-title">bilCAD</span>
-            <span className="brand-subtitle">Akıllı Kent Portalı</span>
-          </div>
-        </div>
-
-        {/* Center Nav Tabs */}
-        <nav className="portal3d-nav-tabs">
-          <button className="portal3d-nav-tab" onClick={goTo2D}>
-            <span>🏠</span> Ana Sayfa
-          </button>
-          <button className="portal3d-nav-tab">
-            <span>🗺️</span> Harita GIS
-          </button>
-          <button className="portal3d-nav-tab" onClick={goTo2D}>
-            <span>📋</span> Kat Planları
-          </button>
-          <button className="portal3d-nav-tab portal3d-nav-tab--active">
-            <span>🧊</span> 3B Görünüm
-          </button>
-          <button className="portal3d-nav-tab">
-            <span>📊</span> Raporlar
-          </button>
-          <button className="portal3d-nav-tab">
-            <span>⚙️</span> Ayarlar
-          </button>
-        </nav>
-
-        {/* Right Search & Profile */}
-        <div className="portal3d-header-right">
-          <div className="portal3d-search-box">
-            <input type="text" placeholder="Arama yap..." />
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="11" cy="11" r="8" />
-              <line x1="21" y1="21" x2="16.65" y2="16.65" />
-            </svg>
-          </div>
-
-          <div className="portal3d-bell" title="Bildirimler">
-            🔔<span className="bell-badge">3</span>
-          </div>
-
-          <div className="portal3d-user-avatar">AK</div>
-        </div>
-      </header>
-
-      {/* Sub-Header Bar (← Geri, Ada, Parsel, Kat...) */}
+      {/* Sub-Header Bar (Parsel, Modeli Güncelle) */}
       <div className="portal3d-subheader">
         <div className="subheader-left">
-          <button className="btn-back-2d" onClick={goTo2D}>
-            ← Geri
-          </button>
-
           <div className="select-pill-wrapper">
             <span>Parsel: {parsel ? `${parsel.areaM2} m²` : "5000 m²"}</span>
           </div>
-          <div className="select-pill-wrapper">
-            <select
-              value={activePageId}
-              onChange={(e) => setActivePageId(e.target.value)}
-              style={{ background: "transparent", color: "inherit", border: "none", outline: "none", cursor: "pointer", fontWeight: "bold" }}
-            >
-              {pages.map((p) => (
-                <option key={p.id} value={p.id} style={{ background: "#1e293b", color: "#fff" }}>
-                  Sayfa: {p.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        </div>
-
-        <div className="subheader-right">
-          <div className="mode-toggle-group">
-            <button className="toggle-btn-3d toggle-btn-3d--active">3B Göster</button>
-            <button className="toggle-btn-3d" onClick={goTo2D}>
-              2D Planı Göster
-            </button>
-          </div>
-
           <button className="btn-refresh-model" onClick={() => pushToast("Model güncellendi.", "basari")}>
             🔄 Modeli Güncelle
           </button>
@@ -490,137 +427,144 @@ export default function View3D() {
 
       {/* Main 3D Workspace */}
       <div className="portal3d-body">
-        {/* Left Sidebar (Öğeler & Katmanlar, Malzeme & Renk) */}
+        {/* Left Sidebar (Bina Bilgileri, Sayfa Bilgileri, Seçili Eleman) */}
         <aside className="portal3d-left-sidebar">
-          {/* Section 1: Öğeler & Katmanlar Accordion */}
-          <div className="accordion-card">
-            <div className="accordion-header" onClick={() => setOgelerExpanded(!ogelerExpanded)}>
-              <span>Öğeler & Katmanlar</span>
-              <span>{ogelerExpanded ? "∧" : "∨"}</span>
+          {/* Bina Bilgileri */}
+          <div className="portal3d-info-card">
+            <div className="info-card-header">
+              <h4>Bina Bilgileri</h4>
             </div>
-            {ogelerExpanded && (
-              <div className="accordion-body">
-                <label className="checkbox-item checkbox-item--bold">
-                  <input
-                    type="checkbox"
-                    checked={layerStates.bina}
-                    onChange={() => toggleLayerState("bina")}
-                  />
-                  <span>🏢 Bina (Tümü)</span>
-                </label>
+            <div className="info-card-body">
+              <div className="info-row">
+                <span>Ada: <strong>124</strong></span>
+                <span>Parsel: <strong>5</strong></span>
+              </div>
+              <div className="info-row">
+                <span>Kat Sayısı: <strong>3</strong></span>
+              </div>
+              <div className="info-row">
+                <span>Toplam Alan: <strong>480 m²</strong></span>
+              </div>
+            </div>
+          </div>
 
-                <div style={{ fontSize: 10, fontWeight: 700, color: "#94a3b8", textTransform: "uppercase", letterSpacing: "0.05em", margin: "8px 0 4px" }}>
-                  Katlar
-                </div>
-                <div className="checkbox-subgroup">
-                  {pages.map((p) => (
-                    <label key={p.id} className="checkbox-item" title="Bu katı 3B sahneden gizle/göster (gerçek — mesh'i kaldırır)">
-                      <input
-                        type="checkbox"
-                        checked={p.visible}
-                        onChange={() => togglePageVisible(p.id)}
-                      />
-                      <span>{p.id === activePageId ? "📍" : "📄"} {p.name}</span>
-                    </label>
-                  ))}
-                </div>
+          {/* Sayfa Bilgileri (Açılır-Kapanır Kat Görünürlük Paneli) */}
+          <div className="portal3d-info-card">
+            <div
+              className="info-card-header"
+              style={{ cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+              onClick={() => setSayfaBilgileriOpen((v) => !v)}
+            >
+              <h4>Sayfa Bilgileri (Katlar)</h4>
+              <span style={{ fontSize: "12px", color: "#94a3b8" }}>{sayfaBilgileriOpen ? "▲" : "▼"}</span>
+            </div>
+            {sayfaBilgileriOpen && (
+              <div className="info-card-body">
+                {pages.map((p) => (
+                  <div
+                    key={p.id}
+                    className={`floor-radio-item ${p.id === activePageId ? "floor-radio-item--active" : ""}`}
+                    onClick={() => setActivePageId(p.id)}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "10px",
+                      padding: "8px 10px",
+                      borderRadius: "6px",
+                      background: p.visible
+                        ? p.id === activePageId
+                          ? "#0284c7"
+                          : "#1e293b"
+                        : "#090f1d",
+                      border: `1px solid ${
+                        p.visible
+                          ? p.id === activePageId
+                            ? "#38bdf8"
+                            : "#334155"
+                          : "#1e293b"
+                      }`,
+                      opacity: p.visible ? 1 : 0.45,
+                      cursor: "pointer",
+                      transition: "all 0.15s ease",
+                    }}
+                  >
+                    {/* Yuvarlak Açılır/Kapanır (Tik / Boşluk) Butonu */}
+                    <div
+                      title={p.visible ? "Katı 3B'de Gizle" : "Katı 3B'de Göster"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        togglePageVisible(p.id);
+                      }}
+                      style={{
+                        width: "18px",
+                        height: "18px",
+                        borderRadius: "50%",
+                        border: `2px solid ${p.visible ? "#38bdf8" : "#64748b"}`,
+                        background: p.visible ? "#0284c7" : "transparent",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        color: "#ffffff",
+                        fontSize: "11px",
+                        fontWeight: "bold",
+                        flexShrink: 0,
+                        cursor: "pointer",
+                        transition: "all 0.15s ease",
+                      }}
+                    >
+                      {p.visible ? "✓" : ""}
+                    </div>
 
-                <label className="checkbox-item">
-                  <input
-                    type="checkbox"
-                    checked={layerStates.duvarlar}
-                    onChange={() => toggleLayerState("duvarlar")}
-                  />
-                  <span>🔲 Duvarlar</span>
-                </label>
-
-                <label className="checkbox-item">
-                  <input
-                    type="checkbox"
-                    checked={layerStates.kapilar}
-                    onChange={() => toggleLayerState("kapilar")}
-                  />
-                  <span>🚪 Kapılar</span>
-                </label>
-
-                <label className="checkbox-item">
-                  <input
-                    type="checkbox"
-                    checked={layerStates.pencereler}
-                    onChange={() => toggleLayerState("pencereler")}
-                  />
-                  <span>🪟 Pencereler</span>
-                </label>
-
-                <label className="checkbox-item">
-                  <input
-                    type="checkbox"
-                    checked={layerStates.balkonlar}
-                    onChange={() => toggleLayerState("balkonlar")}
-                  />
-                  <span>🚪 Balkonlar</span>
-                </label>
-
-                <label className="checkbox-item">
-                  <input
-                    type="checkbox"
-                    checked={layerStates.cati}
-                    onChange={() => toggleLayerState("cati")}
-                  />
-                  <span>🏠 Çatı</span>
-                </label>
-
-                <label className="checkbox-item">
-                  <input
-                    type="checkbox"
-                    checked={layerStates.merdiven}
-                    onChange={() => toggleLayerState("merdiven")}
-                  />
-                  <span>📶 Merdiven</span>
-                </label>
-
-                <label className="checkbox-item">
-                  <input
-                    type="checkbox"
-                    checked={layerStates.diger}
-                    onChange={() => toggleLayerState("diger")}
-                  />
-                  <span>📦 Diğer Elemanlar</span>
-                </label>
+                    {/* Kat Adı ve Kot Bilgisi */}
+                    <span
+                      style={{
+                        fontSize: "12px",
+                        color: p.visible ? "#f8fafc" : "#64748b",
+                        fontWeight: p.id === activePageId ? "600" : "400",
+                        whiteSpace: "nowrap",
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        flex: 1,
+                      }}
+                      title={`${p.name} (Kot: ${(p.kotElevationCm / 100).toFixed(2)}m)`}
+                    >
+                      {p.name} (Kot: {(p.kotElevationCm / 100).toFixed(2)}m)
+                    </span>
+                  </div>
+                ))}
               </div>
             )}
           </div>
 
-          {/* Section 2: Malzeme & Renk Accordion */}
-          <div className="accordion-card">
-            <div className="accordion-header" onClick={() => setMalzemeExpanded(!malzemeExpanded)}>
-              <span>Malzeme & Renk</span>
-              <span>{malzemeExpanded ? "∧" : "∨"}</span>
+          {/* Seçili Eleman */}
+          <div className="portal3d-info-card">
+            <div className="info-card-header">
+              <h4>Seçili Eleman</h4>
             </div>
-            {malzemeExpanded && (
-              <div className="accordion-body">
-                <div className="material-color-row">
-                  <span className="color-swatch-3d" style={{ background: "#C1652F" }} />
-                  <span>Çatı (Tuğla)</span>
-                  <button className="btn-edit-pencil">✏️</button>
-                </div>
-                <div className="material-color-row">
-                  <span className="color-swatch-3d" style={{ background: "#FFFFFF", border: "1px solid #ccc" }} />
-                  <span>Duvar (Beyaz)</span>
-                  <button className="btn-edit-pencil">✏️</button>
-                </div>
-                <div className="material-color-row">
-                  <span className="color-swatch-3d" style={{ background: "#2563EB" }} />
-                  <span>Kapı (Mavi)</span>
-                  <button className="btn-edit-pencil">✏️</button>
-                </div>
-                <div className="material-color-row">
-                  <span className="color-swatch-3d" style={{ background: "#9FC4D8" }} />
-                  <span>Pencere (Cam)</span>
-                  <button className="btn-edit-pencil">✏️</button>
-                </div>
-              </div>
-            )}
+            <div className="info-card-body">
+              {(() => {
+                if (!selectedElement) {
+                  return <div className="info-row" style={{ color: "#94a3b8" }}>Bir mekâna tıklayın.</div>;
+                }
+                const selPage = pages.find((p) => p.id === selectedElement.pageId);
+                const room = selPage?.drawing.rooms[selectedElement.roomId];
+                if (!selPage || !room) {
+                  return <div className="info-row" style={{ color: "#94a3b8" }}>Mekân bulunamadı.</div>;
+                }
+                const area = room.manuelAlanM2 ?? roomAreaM2(room, selPage.drawing.corners);
+                const floorMat = getMaterial(floorMaterials, room.zeminMalzemesi);
+                return (
+                  <>
+                    <div className="element-spec-row"><span>Mekân Adı:</span> <strong>{room.name}</strong></div>
+                    <div className="element-spec-row"><span>Alan:</span> <strong>{area.toFixed(2)} m²</strong></div>
+                    <div className="element-spec-row"><span>Kat:</span> <strong>{selPage.name}</strong></div>
+                    <div className="element-spec-row"><span>Kot:</span> <strong>{(selPage.kotElevationCm / 100).toFixed(2)} m</strong></div>
+                    <div className="element-spec-row"><span>Yükseklik:</span> <strong>{room.height} cm</strong></div>
+                    <div className="element-spec-row"><span>Zemin Kaplama:</span> <strong>{floorMat.label}</strong></div>
+                  </>
+                );
+              })()}
+            </div>
           </div>
         </aside>
 
@@ -696,40 +640,6 @@ export default function View3D() {
             </div>
           )}
 
-          {/* Bottom-Left Camera Mode & Mini-map Overlay Card */}
-          <div className="camera-mode-card">
-            <div className="camera-mode-tabs">
-              <button
-                className={`cam-tab ${cameraMode === "orbit" ? "cam-tab--active" : ""}`}
-                onClick={() => {
-                  setCameraMode("orbit");
-                  if (fpsMode) toggleFpsMode();
-                }}
-              >
-                📷 Kamera Modu
-              </button>
-              <button
-                className={`cam-tab ${cameraMode === "walk" ? "cam-tab--active" : ""}`}
-                onClick={() => {
-                  setCameraMode("walk");
-                  if (!fpsMode) toggleFpsMode();
-                }}
-              >
-                🚶 Yürüyüş Modu
-              </button>
-            </div>
-
-            {/* Mini-map 2D Floor plan thumbnail */}
-            <div className="minimap-thumbnail" title="2D Plan Önizleme Mini-Map">
-              <svg viewBox="0 0 100 80" className="minimap-svg">
-                <rect x="5" y="5" width="90" height="70" fill="#E2E8F0" stroke="#64748B" strokeWidth="2" />
-                <rect x="15" y="15" width="30" height="25" fill="#BFDBFE" stroke="#3B82F6" />
-                <rect x="55" y="15" width="30" height="25" fill="#BFDBFE" stroke="#3B82F6" />
-                <rect x="15" y="45" width="70" height="20" fill="#CBD5E1" stroke="#475569" />
-              </svg>
-            </div>
-          </div>
-
           {/* Bottom-Center Controls Bar (Döndür, Yaklaş, Kaydır, Uzaklaş) */}
           <div className="canvas-bottom-center-bar">
             <button className="bottom-bar-action" onClick={resetCamera}>
@@ -746,84 +656,6 @@ export default function View3D() {
             </button>
           </div>
         </div>
-
-        {/* Right Sidebar (Bina Bilgileri, Kat Bilgileri, Seçili Eleman) */}
-        <aside className="portal3d-right-sidebar">
-          {/* Bina Bilgileri */}
-          <div className="portal3d-info-card">
-            <div className="info-card-header">
-              <h4>Bina Bilgileri</h4>
-              <span className="card-close-x">✕</span>
-            </div>
-            <div className="info-card-body">
-              <div className="info-row">
-                <span>Ada: <strong>124</strong></span>
-                <span>Parsel: <strong>5</strong></span>
-              </div>
-              <div className="info-row">
-                <span>Kat Sayısı: <strong>3</strong></span>
-              </div>
-              <div className="info-row">
-                <span>Toplam Alan: <strong>480 m²</strong></span>
-              </div>
-            </div>
-          </div>
-
-          {/* Kat / Sayfa Bilgileri */}
-          <div className="portal3d-info-card">
-            <div className="info-card-header">
-              <h4>Sayfa Bilgileri</h4>
-            </div>
-            <div className="info-card-body">
-              {pages.map((p) => (
-                <label
-                  key={p.id}
-                  className={`floor-radio-item ${p.id === activePageId ? "floor-radio-item--active" : ""}`}
-                  onClick={() => setActivePageId(p.id)}
-                >
-                  <input
-                    type="radio"
-                    name="floorSelect"
-                    checked={p.id === activePageId}
-                    onChange={() => setActivePageId(p.id)}
-                  />
-                  <span>📄 {p.name} (Kot: {(p.kotElevationCm / 100).toFixed(2)}m)</span>
-                </label>
-              ))}
-            </div>
-          </div>
-
-          {/* Seçili Eleman: gerçek raycasting seçiminden — sahte statik kart değil */}
-          <div className="portal3d-info-card">
-            <div className="info-card-header">
-              <h4>Seçili Eleman</h4>
-            </div>
-            <div className="info-card-body">
-              {(() => {
-                if (!selectedElement) {
-                  return <div className="info-row" style={{ color: "#94a3b8" }}>Bir mekâna tıklayın.</div>;
-                }
-                const selPage = pages.find((p) => p.id === selectedElement.pageId);
-                const room = selPage?.drawing.rooms[selectedElement.roomId];
-                if (!selPage || !room) {
-                  return <div className="info-row" style={{ color: "#94a3b8" }}>Mekân bulunamadı.</div>;
-                }
-                const area = room.manuelAlanM2 ?? roomAreaM2(room, selPage.drawing.corners);
-                const floorMat = getMaterial(floorMaterials, room.zeminMalzemesi);
-                return (
-                  <>
-                    <div className="element-spec-row"><span>Mekân Adı:</span> <strong>{room.name}</strong></div>
-                    <div className="element-spec-row"><span>Alan:</span> <strong>{area.toFixed(2)} m²</strong></div>
-                    <div className="element-spec-row"><span>Kat:</span> <strong>{selPage.name}</strong></div>
-                    <div className="element-spec-row"><span>Kot:</span> <strong>{(selPage.kotElevationCm / 100).toFixed(2)} m</strong></div>
-                    <div className="element-spec-row"><span>Yükseklik:</span> <strong>{room.height} cm</strong></div>
-                    <div className="element-spec-row"><span>Zemin Kaplama:</span> <strong>{floorMat.label}</strong></div>
-                  </>
-                );
-              })()}
-            </div>
-          </div>
-        </aside>
       </div>
     </div>
   );
