@@ -11,6 +11,7 @@ import BottomBar from "./panels/bottom/BottomBar";
 import ToolDock from "./panels/bottom/ToolDock";
 import Toasts from "./ui/Toasts";
 import KrokiWizardScreen from "./panels/stage1/KrokiWizardScreen";
+import AlanYapiGisScreen from "./panels/stage4/AlanYapiGisScreen";
 
 const View3D = lazy(() => import("./view3d/View3D"));
 
@@ -215,6 +216,13 @@ function MainApp() {
           <LeftNavRail />
           <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
             <KrokiWizardScreen />
+          </div>
+        </div>
+      ) : workflowStage === "alan_yapi" ? (
+        <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+          <LeftNavRail />
+          <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+            <AlanYapiGisScreen />
           </div>
         </div>
       ) : (
